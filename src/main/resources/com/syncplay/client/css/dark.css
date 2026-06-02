@@ -1,0 +1,195 @@
+/* ── SyncPlay Dark Theme ────────────────────────────────────────────────── */
+
+* {
+    -fx-font-family: "Segoe UI", "SF Pro Display", "Helvetica Neue", sans-serif;
+}
+
+/* Colour palette */
+.root {
+    -sp-bg:          #0f1117;
+    -sp-surface:     #1a1d27;
+    -sp-surface2:    #252836;
+    -sp-border:      #2e3148;
+    -sp-accent:      #7c6af7;
+    -sp-accent-dim:  #5a4fd1;
+    -sp-green:       #2eca6a;
+    -sp-red:         #e05260;
+    -sp-yellow:      #f0a040;
+    -sp-text:        #e8eaf0;
+    -sp-text-dim:    #8b8fa8;
+    -sp-text-muted:  #555870;
+
+    -fx-background-color: -sp-bg;
+    -fx-text-fill: -sp-text;
+}
+
+/* ── Generic controls ────────────────────────────────────────────────────── */
+
+.label           { -fx-text-fill: -sp-text; }
+.label.muted     { -fx-text-fill: -sp-text-dim; }
+.label.heading   { -fx-text-fill: -sp-text; -fx-font-size: 15px; -fx-font-weight: bold; }
+.label.subhead   { -fx-text-fill: -sp-text-dim; -fx-font-size: 12px; }
+
+.text-field, .password-field {
+    -fx-background-color: -sp-surface2;
+    -fx-border-color: -sp-border;
+    -fx-border-radius: 6px;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -sp-text;
+    -fx-prompt-text-fill: -sp-text-muted;
+    -fx-padding: 7 10 7 10;
+}
+.text-field:focused, .password-field:focused {
+    -fx-border-color: -sp-accent;
+}
+
+.combo-box {
+    -fx-background-color: -sp-surface2;
+    -fx-border-color: -sp-border;
+    -fx-border-radius: 6px;
+    -fx-background-radius: 6px;
+}
+.combo-box .list-cell { -fx-text-fill: -sp-text; -fx-background-color: -sp-surface2; }
+.combo-box-popup .list-view { -fx-background-color: -sp-surface2; -fx-border-color: -sp-border; }
+.combo-box-popup .list-cell:hover { -fx-background-color: -sp-surface; }
+
+.text-area {
+    -fx-background-color: -sp-surface;
+    -fx-border-color: -sp-border;
+    -fx-border-radius: 6px;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -sp-text;
+    -fx-control-inner-background: -sp-surface;
+}
+.text-area .content { -fx-background-color: -sp-surface; }
+
+.list-view {
+    -fx-background-color: -sp-surface;
+    -fx-border-color: -sp-border;
+    -fx-border-radius: 6px;
+    -fx-background-radius: 6px;
+}
+.list-view .list-cell {
+    -fx-background-color: transparent;
+    -fx-text-fill: -sp-text;
+    -fx-padding: 6 10 6 10;
+}
+.list-view .list-cell:selected {
+    -fx-background-color: -sp-accent-dim;
+}
+.list-view .list-cell:hover:!selected {
+    -fx-background-color: -sp-surface2;
+}
+
+.scroll-bar { -fx-background-color: -sp-surface; }
+.scroll-bar .thumb { -fx-background-color: -sp-border; -fx-background-radius: 4px; }
+.scroll-bar .thumb:hover { -fx-background-color: -sp-text-muted; }
+.scroll-bar .increment-button, .scroll-bar .decrement-button { -fx-background-color: transparent; }
+.scroll-bar .increment-arrow, .scroll-bar .decrement-arrow { -fx-background-color: -sp-text-muted; }
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+
+.button {
+    -fx-background-color: -sp-surface2;
+    -fx-border-color: -sp-border;
+    -fx-border-radius: 6px;
+    -fx-background-radius: 6px;
+    -fx-text-fill: -sp-text;
+    -fx-padding: 7 16 7 16;
+    -fx-cursor: hand;
+}
+.button:hover   { -fx-background-color: -sp-surface; }
+.button:pressed { -fx-background-color: -sp-border; }
+
+.button.accent {
+    -fx-background-color: -sp-accent;
+    -fx-border-color: transparent;
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+}
+.button.accent:hover   { -fx-background-color: -sp-accent-dim; }
+.button.accent:pressed { -fx-background-color: derive(-sp-accent-dim, -10%); }
+
+.button.green {
+    -fx-background-color: #1a5c35;
+    -fx-border-color: -sp-green;
+    -fx-text-fill: -sp-green;
+}
+.button.green:hover { -fx-background-color: #24804a; }
+
+.button.red {
+    -fx-background-color: #5c1a22;
+    -fx-border-color: -sp-red;
+    -fx-text-fill: -sp-red;
+}
+.button.red:hover { -fx-background-color: #7a2430; }
+
+.button.icon-btn {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+    -fx-font-size: 18px;
+    -fx-padding: 4 8 4 8;
+}
+.button.icon-btn:hover { -fx-background-color: -sp-surface2; }
+
+/* ── Separator ───────────────────────────────────────────────────────────── */
+
+.separator .line { -fx-border-color: -sp-border; }
+
+/* ── Titled pane / section cards ─────────────────────────────────────────── */
+
+.card {
+    -fx-background-color: -sp-surface;
+    -fx-border-color: -sp-border;
+    -fx-border-radius: 10px;
+    -fx-background-radius: 10px;
+    -fx-padding: 14;
+}
+
+/* ── Mode toggle buttons ─────────────────────────────────────────────────── */
+
+.mode-btn {
+    -fx-background-color: -sp-surface2;
+    -fx-border-color: -sp-border;
+    -fx-border-radius: 8px;
+    -fx-background-radius: 8px;
+    -fx-text-fill: -sp-text-dim;
+    -fx-padding: 10 18 10 18;
+    -fx-font-size: 13px;
+    -fx-cursor: hand;
+    -fx-alignment: center;
+}
+.mode-btn:hover     { -fx-border-color: -sp-accent; -fx-text-fill: -sp-text; }
+.mode-btn.selected  {
+    -fx-background-color: derive(-sp-accent, -40%);
+    -fx-border-color: -sp-accent;
+    -fx-text-fill: white;
+}
+
+/* ── Status indicators ───────────────────────────────────────────────────── */
+
+.status-dot             { -fx-font-size: 11px; }
+.status-dot.connected   { -fx-text-fill: -sp-green; }
+.status-dot.disconnected{ -fx-text-fill: -sp-red; }
+.status-dot.loading     { -fx-text-fill: -sp-yellow; }
+
+/* ── Chat ────────────────────────────────────────────────────────────────── */
+
+.chat-area {
+    -fx-font-family: "Consolas", "Menlo", monospace;
+    -fx-font-size: 12px;
+}
+
+/* ── Tab pane ────────────────────────────────────────────────────────────── */
+
+.tab-pane { -fx-background-color: -sp-bg; }
+.tab-pane .tab-header-area { -fx-background-color: -sp-surface; }
+.tab-pane .tab-header-background { -fx-background-color: -sp-surface; }
+.tab { -fx-background-color: -sp-surface2; }
+.tab:selected { -fx-background-color: -sp-accent-dim; }
+.tab .tab-label { -fx-text-fill: -sp-text-dim; }
+.tab:selected .tab-label { -fx-text-fill: white; }
+
+/* ── Progress indicator ──────────────────────────────────────────────────── */
+
+.progress-indicator { -fx-progress-color: -sp-accent; }
