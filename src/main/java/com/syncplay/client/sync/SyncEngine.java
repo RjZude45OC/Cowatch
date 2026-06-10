@@ -3,60 +3,107 @@ package com.syncplay.client.sync;
 import com.syncplay.client.mpv.MPVController;
 import com.syncplay.client.network.ServerConnection;
 import org.json.*;
+
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.*;
 
 /**
  * Core sync engine — bridges MPV ↔ relay server.
  *
- * Two directions:
- *  1. Local user acts in MPV  → detect it → tell server → broadcast to others
- *  2. Remote event from server → apply to local MPV
+ * Two modes:
+ *  LOCAL  — no ServerConnection; MPV runs standalone, all controls work normally.
+ *  SYNCED — connected to relay server; local actions are broadcast and remote
+ *           actions are applied to local MPV.
  *
- * Detects skips done DIRECTLY inside MPV (arrow keys, progress bar click etc.)
- * via MPV's observe_property on "time-pos" — so yes, skipping in MPV syncs too.
+ * Local → Server:
+ *   MPV property-change events (time-pos, pause) are observed continuously.
+ *   A position jump > SKIP_THRESHOLD in the EXPECTED direction signals a seek.
+ *
+ * Server → Local:
+ *   play / pause / seek events are applied to MPV while suppressMpvEvents is
+ *   set, preventing the resulting property-change from being echoed back.
  */
 public class SyncEngine {
 
     private static final Logger log = Logger.getLogger(SyncEngine.class.getName());
 
-    // If position jumps more than this in one step → user skipped
+    /** Position jump larger than this (seconds) is treated as an intentional seek. */
     private static final double SKIP_THRESHOLD = 2.5;
 
-    // If we're within this many seconds of target → don't re-seek (avoid jitter)
+    /**
+     * If local and remote positions are within this many seconds, skip the
+     * re-seek to avoid frame jitter.
+     */
     private static final double SEEK_DEAD_ZONE = 0.8;
 
-    private final MPVController    mpv;
-    private final ServerConnection server;
+    /**
+     * How long (ms) to suppress MPV→server echo after applying a remote command.
+     * Must be long enough for MPV's async IPC to fire its property-change events.
+     */
+    private static final long SUPPRESS_DURATION_MS = 700;
 
-    private double  lastPos         = 0.0;
-    private boolean paused          = true;
-    private boolean suppressMpvEvents = false; // prevent feedback loops
+    private final MPVController  mpv;
+    private final ServerConnection server; // null in local mode
 
+    private volatile double  lastPos = 0.0;
+    private volatile boolean paused  = true;
+
+    /**
+     * When true, property-change events from MPV are NOT forwarded to the server.
+     * Used to break the feedback loop when we apply a remote command locally.
+     * AtomicBoolean so the reader thread and suppression-timer thread are safe.
+     */
+    private final AtomicBoolean suppressMpvEvents = new AtomicBoolean(false);
+
+    /** Single-thread scheduler for the suppress-reset timer (replaces raw Thread). */
+    private final ScheduledExecutorService suppressScheduler =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "sync-suppress-timer");
+                t.setDaemon(true);
+                return t;
+            });
+
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * @param mpv    always required
+     * @param server pass null for local-only mode
+     */
     public SyncEngine(MPVController mpv, ServerConnection server) {
         this.mpv    = mpv;
         this.server = server;
         hookEvents();
     }
 
-    // ─── Wire up both sides ───────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────
+    // WIRING
+    // ─────────────────────────────────────────────────────────────
 
     private void hookEvents() {
         mpv.setEventListener(this::onMpvEvent);
-        server.addMessageHandler(this::onServerEvent);
+
+        // Only wire server listener when actually connected
+        if (isSynced()) {
+            server.addMessageHandler(this::onServerEvent);
+        }
     }
 
-    // ─── MPV → Server (local user did something) ──────────────────────────
+    private boolean isSynced() {
+        return server != null && server.isConnected();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // MPV → SERVER
+    // ─────────────────────────────────────────────────────────────
 
     private void onMpvEvent(String rawJson) {
         if (rawJson.isBlank()) return;
         try {
             JSONObject msg = new JSONObject(rawJson);
 
-            // ── Property change pushed by MPV automatically ───────────────
             if ("property-change".equals(msg.optString("event"))) {
-                String name = msg.optString("name");
-
-                switch (name) {
+                switch (msg.optString("name")) {
                     case "time-pos" -> {
                         double newPos = msg.optDouble("data", lastPos);
                         handlePositionChange(newPos);
@@ -69,9 +116,8 @@ public class SyncEngine {
                 return;
             }
 
-            // ── Reply to get_property request ─────────────────────────────
-            if (msg.has("request_id") && msg.has("data")
-                    && !msg.has("event")) {
+            // Reply to get_property / request_id queries
+            if (msg.has("request_id") && !msg.has("event")) {
                 Object data = msg.opt("data");
                 if (data instanceof Number) {
                     lastPos = ((Number) data).doubleValue();
@@ -84,70 +130,91 @@ public class SyncEngine {
     }
 
     /**
-     * Called every ~1s with MPV's current time-pos.
-     * If it jumped by more than SKIP_THRESHOLD → user skipped inside MPV.
+     * Called ~every second with MPV's current playback position.
+     *
+     * Skip detection requires:
+     *   1. Jump is larger than SKIP_THRESHOLD
+     *   2. We weren't already suppressing (i.e. we didn't cause it)
+     *   3. The jump is in the FORWARD direction — backward jumps of any size
+     *      are always intentional seeks; forward jumps of exactly 1s are normal
+     *      playback ticks and must be filtered by threshold alone.
+     *
+     * The direction check avoids false positives during buffering stalls where
+     * MPV may report a 2-3 s jump forward after catching up.
+     * To handle that edge-case we additionally check that the video is currently
+     * playing (not paused), because buffer-catchup only happens while playing.
      */
     private void handlePositionChange(double newPos) {
-        if (suppressMpvEvents) {
-            lastPos = newPos;
-            return;
-        }
-
-        double delta = Math.abs(newPos - lastPos);
-
-        if (delta > SKIP_THRESHOLD) {
-            // This is a skip — tell everyone
-            log.info("Skip detected in MPV: " + lastPos + " → " + newPos
-                     + " (Δ" + String.format("%.1f", delta) + "s)");
-            server.sendSeek(newPos);
-        }
-
+        double prev = lastPos;
         lastPos = newPos;
+
+        if (suppressMpvEvents.get()) return;
+
+        double delta = newPos - prev; // signed: positive = forward
+
+        // A large backward jump, or a large forward jump while paused → seek
+        boolean isBackwardSeek = delta < -SKIP_THRESHOLD;
+        boolean isForwardSeek  = delta >  SKIP_THRESHOLD && paused;
+        // Large forward jump while playing could be buffering catch-up — ignore
+        boolean isBufferingCatchup = delta > SKIP_THRESHOLD && !paused;
+
+        if ((isBackwardSeek || isForwardSeek) && !isBufferingCatchup) {
+            log.info(String.format(
+                    "Seek detected in MPV: %.2f → %.2f (Δ%.1fs)",
+                    prev, newPos, delta));
+            if (isSynced()) {
+                server.sendSeek(newPos);
+            }
+        }
     }
 
     /**
-     * Called when MPV's pause state changes (space bar, right-click menu etc.)
+     * Called when MPV's pause property changes (space bar, UI click, etc.).
      */
     private void handlePauseChange(boolean nowPaused) {
-        if (suppressMpvEvents) {
-            paused = nowPaused;
-            return;
-        }
-
-        if (nowPaused && !paused) {
-            log.info("MPV paused at " + lastPos + " (detected via property-change)");
-            server.sendPause(lastPos);
-        } else if (!nowPaused && paused) {
-            log.info("MPV playing at " + lastPos + " (detected via property-change)");
-            server.sendPlay(lastPos);
-        }
-
+        boolean wasPaused = paused;
         paused = nowPaused;
+
+        if (suppressMpvEvents.get()) return;
+
+        if (nowPaused && !wasPaused) {
+            log.info(String.format("MPV paused at %.2fs", lastPos));
+            if (isSynced()) server.sendPause(lastPos);
+
+        } else if (!nowPaused && wasPaused) {
+            log.info(String.format("MPV playing at %.2fs", lastPos));
+            if (isSynced()) server.sendPlay(lastPos);
+        }
     }
 
-    // ─── Server → MPV (remote user did something) ────────────────────────
+    // ─────────────────────────────────────────────────────────────
+    // SERVER → MPV
+    // ─────────────────────────────────────────────────────────────
 
     private void onServerEvent(String rawJson) {
         if (rawJson.isBlank()) return;
         log.info("Server → " + rawJson);
 
         try {
-            JSONObject msg    = new JSONObject(rawJson);
-            String event      = msg.getString("event");
-            String from       = msg.optString("from", "?");
-            double position   = msg.optDouble("position", -1);
-            long   serverTime = msg.optLong("serverTime", System.currentTimeMillis());
+            JSONObject msg      = new JSONObject(rawJson);
+            String event        = msg.getString("event");
+            String from         = msg.optString("from", "?");
+            double position     = msg.optDouble("position", -1);
+            long   serverTime   = msg.optLong("serverTime", System.currentTimeMillis());
 
-            // Compensate for message travel time
+            // Compensate for network latency
             double ageSeconds = (System.currentTimeMillis() - serverTime) / 1000.0;
+            // Clamp age — wildly wrong clocks should not seek to garbage positions
+            double clampedAge = Math.max(0, Math.min(ageSeconds, 5.0));
 
             switch (event) {
                 case "play" -> {
                     log.info(from + " → play at " + position);
-                    double target = position + ageSeconds;
+                    double target = position + clampedAge;
                     applyRemote(() -> {
-                        if (Math.abs(lastPos - target) > SEEK_DEAD_ZONE)
+                        if (Math.abs(lastPos - target) > SEEK_DEAD_ZONE) {
                             mpv.seekTo(target);
+                        }
                         mpv.play();
                     });
                 }
@@ -155,19 +222,20 @@ public class SyncEngine {
                     log.info(from + " → pause at " + position);
                     applyRemote(() -> {
                         mpv.pause();
-                        // Snap to exact pause point so both freeze at same frame
-                        if (Math.abs(lastPos - position) > SEEK_DEAD_ZONE)
+                        // Snap to the exact frame the remote user paused on
+                        if (Math.abs(lastPos - position) > SEEK_DEAD_ZONE) {
                             mpv.seekTo(position);
+                        }
                     });
                 }
                 case "seek" -> {
                     log.info(from + " → seek to " + position);
-                    double target = position + ageSeconds;
+                    double target = position + clampedAge;
                     if (Math.abs(lastPos - target) > SEEK_DEAD_ZONE) {
                         applyRemote(() -> mpv.seekTo(target));
                     }
                 }
-                // chat / system / joined → handled by ChatPanel via its own listener
+                // chat / joined / system → handled by ChatPanel via its own listener
             }
 
         } catch (Exception e) {
@@ -176,58 +244,78 @@ public class SyncEngine {
     }
 
     /**
-     * Run an MPV command while suppressing the resulting property-change
+     * Runs an MPV command while suppressing the resulting property-change
      * events so we don't echo them back to the server.
+     *
+     * Uses a ScheduledExecutorService instead of a raw Thread to avoid
+     * unbounded thread creation under rapid sync events.
      */
     private void applyRemote(Runnable action) {
-        suppressMpvEvents = true;
+        suppressMpvEvents.set(true);
         action.run();
-        // Re-enable after a short delay (MPV IPC is async)
-        new Thread(() -> {
-            try { Thread.sleep(600); } catch (InterruptedException ignored) {}
-            suppressMpvEvents = false;
-        }).start();
+        suppressScheduler.schedule(
+                () -> suppressMpvEvents.set(false),
+                SUPPRESS_DURATION_MS,
+                TimeUnit.MILLISECONDS
+        );
     }
 
-    // ─── Public controls (called by PlaybackControls UI buttons) ─────────
+    // ─────────────────────────────────────────────────────────────
+    // PUBLIC CONTROLS  (called by PlaybackControls UI)
+    // ─────────────────────────────────────────────────────────────
 
+    /**
+     * User pressed Play in the UI.
+     * Tells MPV to play, then broadcasts to server if connected.
+     * We read lastPos AFTER queuing the MPV command so both use the same value.
+     */
     public void localPlay() {
+        // Snapshot position before the async MPV play command changes it
+        double pos = lastPos;
         mpv.play();
-
-        if (server != null && server.isConnected()) {
-            server.sendPlay(lastPos);
+        if (isSynced()) {
+            server.sendPlay(pos);
         }
     }
 
     public void localPause() {
+        double pos = lastPos;
         mpv.pause();
-
-        if (server != null && server.isConnected()) {
-            server.sendPause(lastPos);
+        if (isSynced()) {
+            server.sendPause(pos);
         }
     }
 
     public void localSeek(double position) {
+        lastPos = position;          // update immediately so delta calc is correct
         mpv.seekTo(position);
-
-        if (server != null && server.isConnected()) {
+        if (isSynced()) {
             server.sendSeek(position);
         }
-
-        lastPos = position;
     }
 
-    /** Skip forward by N seconds */
     public void localSkipForward(double seconds) {
         localSeek(lastPos + seconds);
     }
 
-    /** Skip backward by N seconds */
     public void localSkipBackward(double seconds) {
         localSeek(Math.max(0, lastPos - seconds));
     }
 
-    public double getLastPos() { return lastPos; }
-    public boolean isPaused()  { return paused; }
-    public ServerConnection  getServerConnection() { return server; }
+    // ─────────────────────────────────────────────────────────────
+    // ACCESSORS
+    // ─────────────────────────────────────────────────────────────
+
+    public double          getLastPos()          { return lastPos; }
+    public boolean         isPaused()            { return paused; }
+    public boolean         isLocalMode()         { return !isSynced(); }
+    public ServerConnection getServerConnection() { return server; }
+
+    // ─────────────────────────────────────────────────────────────
+    // SHUTDOWN
+    // ─────────────────────────────────────────────────────────────
+
+    public void close() {
+        suppressScheduler.shutdownNow();
+    }
 }
