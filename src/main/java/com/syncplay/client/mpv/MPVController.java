@@ -1,5 +1,9 @@
 package com.syncplay.client.mpv;
 
+import com.sun.jna.*;
+import com.sun.jna.platform.win32.WinNT;
+import com.sun.jna.win32.StdCallLibrary;
+
 import java.io.*;
 import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
@@ -11,27 +15,18 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.logging.*;
 
-/**
- * Controls MPV via JSON IPC.
- *
- * Windows : Named pipe  →  \\.\pipe\mpvsocket
- * Linux / macOS : Unix socket  →  /tmp/mpvsocket
- */
 public class MPVController {
 
     private static final Logger log = Logger.getLogger(MPVController.class.getName());
 
-    private static final String SOCKET_PATH = getSocketPath();
-    private static final String MPV_BIN     = getMpvBinary();
+    private static final String SOCKET_PATH        = getSocketPath();
+    private static final String MPV_BIN            = getMpvBinary();
+    private static final int    CONNECT_TIMEOUT_MS = 5_000;
+    private static final int    CONNECT_POLL_MS    = 200;
 
-    /** How long to wait for the socket/pipe to appear after MPV starts. */
-    private static final int CONNECT_TIMEOUT_MS = 5_000;
-    private static final int CONNECT_POLL_MS    = 200;
+    private Process      mpvProcess;
+    private WinNT.HANDLE pipeHandle;
 
-    private Process mpvProcess;
-
-    // Written once after connect; read from two threads (reader + ipcExecutor).
-    // Guarded by synchronized(writeLock).
     private OutputStream writeStream;
     private final Object writeLock = new Object();
 
@@ -42,331 +37,275 @@ public class MPVController {
                 return t;
             });
 
-    private final ExecutorService ipcExecutor =
-            Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "mpv-ipc-writer");
-                t.setDaemon(true);
-                return t;
-            });
-
-    private final AtomicInteger requestId = new AtomicInteger(1);
-
-    /** Called on every JSON line received from MPV (reader thread). */
+    private final AtomicInteger       requestId     = new AtomicInteger(1);
     private volatile Consumer<String> eventListener;
+
+    // ── JNA Kernel32 ─────────────────────────────────────────────
+
+    public interface Kernel32 extends StdCallLibrary {
+        Kernel32 INSTANCE = Native.load("kernel32", Kernel32.class);
+
+        int GENERIC_READ         = 0x80000000;
+        int GENERIC_WRITE        = 0x40000000;
+        int OPEN_EXISTING        = 3;
+        int FILE_FLAG_OVERLAPPED = 0x40000000;
+        int ERROR_IO_PENDING     = 997;
+
+        WinNT.HANDLE CreateFileW(WString name, int access, int share,
+                                 Pointer sec, int disposition, int flags, WinNT.HANDLE tmpl);
+
+        WinNT.HANDLE CreateEventW(Pointer sec, boolean manualReset,
+                                  boolean initial, WString name);
+
+        boolean ReadFile(WinNT.HANDLE h, Memory buf, int toRead,
+                         Pointer lpBytes, OVL ov);
+
+        boolean WriteFile(WinNT.HANDLE h, byte[] buf, int toWrite,
+                          Pointer lpBytes, OVL ov);
+
+        boolean GetOverlappedResult(WinNT.HANDLE h, OVL ov,
+                                    int[] transferred, boolean wait);
+
+        boolean ResetEvent(WinNT.HANDLE h);
+        boolean CloseHandle(WinNT.HANDLE h);
+        int     GetLastError();
+    }
 
     // ─────────────────────────────────────────────────────────────
 
     private static boolean isWindows() {
         return System.getProperty("os.name").toLowerCase().contains("win");
     }
-
     private static String getSocketPath() {
         return isWindows() ? "\\\\.\\pipe\\mpvsocket" : "/tmp/mpvsocket";
     }
-
     private static String getMpvBinary() {
         return isWindows() ? "mpv.exe" : "mpv";
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // LAUNCH
-    // ─────────────────────────────────────────────────────────────
+    // ── LAUNCH ───────────────────────────────────────────────────
 
     public boolean launch(String fileOrUrl) {
         try {
             List<String> cmd = new ArrayList<>(Arrays.asList(
-                    MPV_BIN,
-                    "--input-ipc-server=" + SOCKET_PATH,
-                    "--pause",
-                    "--quiet",
-                    fileOrUrl
-            ));
-
+                    MPV_BIN, "--input-ipc-server=" + SOCKET_PATH,
+                    "--pause", "--quiet", fileOrUrl));
             log.info("Launching MPV: " + String.join(" ", cmd));
 
-            mpvProcess = new ProcessBuilder(cmd)
-                    .redirectErrorStream(true)
-                    .start();
+            mpvProcess = new ProcessBuilder(cmd).redirectErrorStream(true).start();
 
-            // Drain MPV's stdout/stderr so it doesn't block on a full pipe buffer
-            Thread stdoutDrainer = new Thread(() -> {
+            Thread drainer = new Thread(() -> {
                 try (BufferedReader r = new BufferedReader(
                         new InputStreamReader(mpvProcess.getInputStream()))) {
-                    String line;
-                    while ((line = r.readLine()) != null) {
-                        log.finest("[mpv-stdout] " + line);
-                    }
+                    while (r.readLine() != null) {}
                 } catch (IOException ignored) {}
             }, "mpv-stdout-drainer");
-            stdoutDrainer.setDaemon(true);
-            stdoutDrainer.start();
+            drainer.setDaemon(true);
+            drainer.start();
 
             return waitForSocketAndConnect();
-
         } catch (Exception e) {
             log.severe("Failed to launch MPV: " + e.getMessage());
             return false;
         }
     }
 
-    /**
-     * Polls until the socket/pipe is available (MPV creates it asynchronously),
-     * then connects. Avoids a hard-coded sleep.
-     */
     private boolean waitForSocketAndConnect() throws InterruptedException {
         long deadline = System.currentTimeMillis() + CONNECT_TIMEOUT_MS;
-
         while (System.currentTimeMillis() < deadline) {
-            if (socketExists()) {
-                return connectIPC();
-            }
+            if (new File(SOCKET_PATH).exists()) return connectIPC();
             Thread.sleep(CONNECT_POLL_MS);
         }
-
-        log.severe("Timed out waiting for MPV socket: " + SOCKET_PATH);
+        log.severe("Timed out waiting for MPV socket");
         return false;
     }
 
-    private boolean socketExists() {
-        if (isWindows()) {
-            // On Windows the pipe appears as a file; just try to stat it
-            return new File(SOCKET_PATH).exists();
-        } else {
-            return new File(SOCKET_PATH).exists();
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // CONNECT
-    // ─────────────────────────────────────────────────────────────
+    // ── CONNECT ──────────────────────────────────────────────────
 
     private boolean connectIPC() {
         try {
-            if (isWindows()) {
-                return connectWindowsPipe();
-            } else {
-                return connectUnixSocket();
-            }
+            return isWindows() ? connectWindowsPipe() : connectUnixSocket();
         } catch (Exception e) {
-            log.severe("Failed to connect IPC: " + e.getMessage());
+            log.severe("IPC connect failed: " + e.getMessage());
             return false;
         }
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // UNIX SOCKET  (Java 16+ UnixDomainSocket)
-    // ─────────────────────────────────────────────────────────────
-
     private boolean connectUnixSocket() throws IOException {
-        UnixDomainSocketAddress address =
-                UnixDomainSocketAddress.of(SOCKET_PATH);
+        SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX);
+        ch.connect(UnixDomainSocketAddress.of(SOCKET_PATH));
+        synchronized (writeLock) {
+            writeStream = Channels.newOutputStream(ch);
+        }
+        startReaderThread(new BufferedReader(
+                new InputStreamReader(Channels.newInputStream(ch))));
+        subscribeToEvents();
+        log.info("Connected Unix socket: " + SOCKET_PATH);
+        return true;
+    }
 
-        SocketChannel channel = SocketChannel.open(StandardProtocolFamily.UNIX);
-        channel.connect(address);
+    private boolean connectWindowsPipe() {
+        Kernel32 k = Kernel32.INSTANCE;
 
-        // Use Channels.newInputStream/newOutputStream — channel.socket() is NOT
-        // supported for Unix-domain SocketChannels on Java 16+
-        InputStream  in  = Channels.newInputStream(channel);
-        OutputStream out = Channels.newOutputStream(channel);
+        WinNT.HANDLE h = k.CreateFileW(
+                new WString(SOCKET_PATH),
+                Kernel32.GENERIC_READ | Kernel32.GENERIC_WRITE,
+                0, null,
+                Kernel32.OPEN_EXISTING,
+                Kernel32.FILE_FLAG_OVERLAPPED,
+                null);
+
+        int err = k.GetLastError();
+        if (h == null || err != 0) {
+            log.severe("CreateFile failed, error=" + err);
+            return false;
+        }
+        pipeHandle = h;
+
+        // Write stream — own OVERLAPPED + event
+        WinNT.HANDLE writeEvent = k.CreateEventW(null, true, false, null);
+        OVL writeOVL = new OVL();
+        writeOVL.hEvent = writeEvent;
+        writeOVL.write();
+
+        OutputStream out = new OutputStream() {
+            @Override public void write(int b) throws IOException {
+                write(new byte[]{(byte) b}, 0, 1);
+            }
+            @Override public void write(byte[] buf, int off, int len) throws IOException {
+                byte[] chunk = (off == 0 && len == buf.length)
+                        ? buf : Arrays.copyOfRange(buf, off, off + len);
+                k.ResetEvent(writeEvent);
+                boolean ok = k.WriteFile(pipeHandle, chunk, chunk.length, null, writeOVL);
+                int we = k.GetLastError();
+                if (!ok && we != Kernel32.ERROR_IO_PENDING)
+                    throw new IOException("WriteFile error=" + we);
+                int[] xfer = {0};
+                if (!k.GetOverlappedResult(pipeHandle, writeOVL, xfer, true))
+                    throw new IOException("GetOverlappedResult(write) error=" + k.GetLastError());
+            }
+        };
+
+        // Read stream — own OVERLAPPED + event
+        WinNT.HANDLE readEvent = k.CreateEventW(null, true, false, null);
+        OVL readOVL = new OVL();
+        readOVL.hEvent = readEvent;
+        readOVL.write();
+
+        InputStream in = new InputStream() {
+            final Memory tmp = new Memory(4096);
+            @Override public int read() throws IOException {
+                byte[] b = new byte[1];
+                int n = read(b, 0, 1);
+                return n == -1 ? -1 : (b[0] & 0xFF);
+            }
+            @Override public int read(byte[] dst, int off, int len) throws IOException {
+                int toRead = Math.min(len, (int) tmp.size());
+                k.ResetEvent(readEvent);
+                boolean ok = k.ReadFile(pipeHandle, tmp, toRead, null, readOVL);
+                int re = k.GetLastError();
+                if (!ok && re != Kernel32.ERROR_IO_PENDING) return -1;
+                int[] xfer = {0};
+                if (!k.GetOverlappedResult(pipeHandle, readOVL, xfer, true)) return -1;
+                if (xfer[0] == 0) return -1;
+                tmp.read(0, dst, off, xfer[0]);
+                return xfer[0];
+            }
+        };
 
         synchronized (writeLock) {
-            writeStream = out;
+            writeStream = new BufferedOutputStream(out);
         }
-
         startReaderThread(new BufferedReader(new InputStreamReader(in)));
         subscribeToEvents();
-
-        log.info("Connected to MPV Unix socket: " + SOCKET_PATH);
+        log.info("Connected Windows pipe (overlapped): " + SOCKET_PATH);
         return true;
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // WINDOWS NAMED PIPE
-    //
-    // MPV creates the pipe as a byte-stream pipe.  We need TWO separate
-    // native file handles — one opened for reading, one for writing —
-    // because a single RandomAccessFile handle in "rw" mode causes
-    // read() and write() to share a file pointer, which corrupts IPC.
-    //
-    // FileInputStream / FileOutputStream each open the pipe independently
-    // (each gets its own native HANDLE) which is the correct approach.
-    // ─────────────────────────────────────────────────────────────
-
-    private boolean connectWindowsPipe() throws IOException {
-        // Open two separate handles to the same pipe
-        FileOutputStream pipeOut = new FileOutputStream(SOCKET_PATH);
-        FileInputStream  pipeIn  = new FileInputStream(SOCKET_PATH);
-
-        synchronized (writeLock) {
-            writeStream = new BufferedOutputStream(pipeOut);
-        }
-
-        startReaderThread(new BufferedReader(new InputStreamReader(pipeIn)));
-        subscribeToEvents();
-
-        log.info("Connected to MPV Windows pipe: " + SOCKET_PATH);
-        return true;
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // READER THREAD
-    // ─────────────────────────────────────────────────────────────
+    // ── READER THREAD ────────────────────────────────────────────
 
     private void startReaderThread(BufferedReader reader) {
         readerExecutor.submit(() -> {
             try {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    String trimmed = line.trim();
-                    if (!trimmed.isEmpty()) {
-                        Consumer<String> listener = eventListener;
-                        if (listener != null) {
-                            listener.accept(trimmed);
-                        }
+                    String t = line.trim();
+                    if (!t.isEmpty()) {
+                        log.finest("MPV ← " + t);
+                        Consumer<String> l = eventListener;
+                        if (l != null) l.accept(t);
                     }
                 }
+                log.warning("MPV reader: stream ended");
             } catch (IOException e) {
-                log.warning("MPV reader closed: " + e.getMessage());
+                log.warning("MPV reader died: " + e.getMessage());
             }
         });
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // EVENT SUBSCRIPTIONS
-    // ─────────────────────────────────────────────────────────────
+    // ── SUBSCRIPTIONS ────────────────────────────────────────────
 
     private void subscribeToEvents() {
-        // observe_property is safe to call immediately after connection;
-        // MPV queues the command even if playback hasn't started yet.
         sendRaw("{\"command\":[\"observe_property\",1,\"time-pos\"]}");
         sendRaw("{\"command\":[\"observe_property\",2,\"pause\"]}");
         sendRaw("{\"command\":[\"observe_property\",3,\"duration\"]}");
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // PLAYBACK CONTROL
-    // ─────────────────────────────────────────────────────────────
+    // ── PLAYBACK CONTROLS ────────────────────────────────────────
 
-    public void play() {
-        sendCommand("set_property", "pause", false);
+    public void play()  {
+        sendRaw("{\"command\":[\"set_property\",\"pause\",false]}");
         log.info("MPV: play");
     }
-
     public void pause() {
-        sendCommand("set_property", "pause", true);
+        sendRaw("{\"command\":[\"set_property\",\"pause\",true]}");
         log.info("MPV: pause");
     }
-
-    public void seekTo(double positionSeconds) {
-        sendCommand("seek", positionSeconds, "absolute");
-        log.info("MPV: seek → " + positionSeconds);
+    public void seekTo(double s) {
+        sendRaw("{\"command\":[\"seek\"," + s + ",\"absolute\"]}");
+        log.info("MPV: seek → " + s);
     }
-
     public void requestPosition() {
-        sendCommandWithId("get_property", "time-pos");
-    }
-
-    public void loadFile(String fileOrUrl) {
-        sendCommand("loadfile", fileOrUrl);
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // COMMAND BUILDERS
-    // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Builds {"command":[...]} — no request_id (fire-and-forget).
-     */
-    private void sendCommand(Object... args) {
-        sendRaw(buildCommand(false, args));
-    }
-
-    /**
-     * Builds {"command":[...],"request_id":N} — reply will carry the same id.
-     */
-    private void sendCommandWithId(Object... args) {
         int id = requestId.getAndIncrement();
-        sendRaw(buildCommand(true, args) + buildRequestId(id));
-        // Note: full JSON is assembled in buildRawWithId; keeping separate for clarity
-        sendRaw("{\"command\":[\"get_property\",\"time-pos\"],\"request_id\":"
-                + id + "}");
+        sendRaw("{\"command\":[\"get_property\",\"time-pos\"],\"request_id\":" + id + "}");
+    }
+    public void loadFile(String f) {
+        sendRaw("{\"command\":[\"loadfile\",\"" + escapeJson(f) + "\"]}");
     }
 
-    private String buildCommand(boolean withId, Object... args) {
-        StringBuilder sb = new StringBuilder("{\"command\":[");
-        for (int i = 0; i < args.length; i++) {
-            if (i > 0) sb.append(",");
-            Object arg = args[i];
-            if (arg instanceof String) {
-                sb.append("\"").append(arg).append("\"");
-            } else if (arg instanceof Boolean) {
-                sb.append(arg);
-            } else {
-                sb.append(arg);
-            }
-        }
-        sb.append("]}");
-        return sb.toString();
-    }
-
-    private String buildRequestId(int id) {
-        return ",\"request_id\":" + id + "}";
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // THREAD-SAFE WRITE
-    // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Enqueues a raw JSON string to be sent to MPV.
-     * The string must NOT contain newlines (MPV uses newline as message delimiter).
-     * A trailing newline is appended here.
-     */
     public void sendRaw(String json) {
-        // Trim the string — text blocks may have leading/trailing whitespace
         String clean = json.strip();
         if (clean.isEmpty()) return;
-
-        ipcExecutor.submit(() -> {
-            synchronized (writeLock) {
-                if (writeStream == null) return;
-                try {
-                    writeStream.write((clean + "\n").getBytes());
-                    writeStream.flush();
-                } catch (Exception e) {
-                    log.warning("Failed to send MPV command: " + e.getMessage());
-                }
+        synchronized (writeLock) {
+            if (writeStream == null) return;
+            try {
+                writeStream.write((clean + "\n").getBytes());
+                writeStream.flush();
+            } catch (Exception e) {
+                log.warning("Failed to send MPV command: " + e.getMessage());
             }
-        });
+        }
     }
 
-    // ─────────────────────────────────────────────────────────────
-
-    public void setEventListener(Consumer<String> listener) {
-        this.eventListener = listener;
+    private static String escapeJson(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
-    public boolean isRunning() {
-        return mpvProcess != null && mpvProcess.isAlive();
-    }
+    public void setEventListener(Consumer<String> l) { this.eventListener = l; }
+    public boolean isRunning() { return mpvProcess != null && mpvProcess.isAlive(); }
 
-    // ─────────────────────────────────────────────────────────────
-    // SHUTDOWN
-    // ─────────────────────────────────────────────────────────────
+    // ── SHUTDOWN ─────────────────────────────────────────────────
 
     public void close() {
         readerExecutor.shutdownNow();
-        ipcExecutor.shutdownNow();
-
         synchronized (writeLock) {
-            try {
-                if (writeStream != null) writeStream.close();
-            } catch (Exception ignored) {}
+            try { if (writeStream != null) writeStream.close(); } catch (Exception ignored) {}
             writeStream = null;
         }
-
-        if (mpvProcess != null) {
-            mpvProcess.destroy();
+        if (pipeHandle != null) {
+            Kernel32.INSTANCE.CloseHandle(pipeHandle);
+            pipeHandle = null;
         }
+        if (mpvProcess != null) mpvProcess.destroy();
     }
 }
