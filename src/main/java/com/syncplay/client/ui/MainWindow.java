@@ -8,40 +8,25 @@ import com.syncplay.client.ui.controllers.*;
 
 import javafx.application.Platform;
 import javafx.geometry.Insets;
-import javafx.geometry.Pos;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import javafx.stage.Stage;
 
-/**
- * Root window layout.
- *
- * ┌──────────────────────────────────────────────────────┐
- * │  Header: logo + connection status                    │
- * ├──────────────────────────┬───────────────────────────┤
- * │  Left panel              │  Right panel              │
- * │  • Mode selector         │  • Jellyfin browser OR    │
- * │  • Server config         │    local file picker      │
- * │  • Room config           │  • Playback controls      │
- * │  • User config           │  • Chat                   │
- * └──────────────────────────┴───────────────────────────┘
- */
 public class MainWindow {
 
-    private final Stage stage;
+    private final Stage      stage;
     private final BorderPane root = new BorderPane();
 
-    // Core services
     private final MPVController    mpv    = new MPVController();
     private final ServerConnection server = new ServerConnection();
     private SyncEngine syncEngine;
 
-    // Sub-controllers
     private final HeaderBar        headerBar;
     private final ConfigPanel      configPanel;
     private final MediaPanel       mediaPanel;
     private final ChatPanel        chatPanel;
     private final PlaybackControls playbackControls;
+    private final OffsetPanel      offsetPanel;
 
     public MainWindow(Stage stage) {
         this.stage = stage;
@@ -53,45 +38,53 @@ public class MainWindow {
         mediaPanel       = new MediaPanel(this);
         playbackControls = new PlaybackControls(this);
         chatPanel        = new ChatPanel(server);
+        offsetPanel      = new OffsetPanel();
+
+        offsetPanel.setSyncEngine(syncEngine);
 
         buildLayout();
         wireShutdown();
     }
 
     private void buildLayout() {
-        // ── Header ────────────────────────────────────────────────────────
         root.setTop(headerBar.getNode());
+        root.getStyleClass().add("app-root");
 
-        // ── Left panel: config + playback, scrollable ─────────────────────
-        VBox leftContent = new VBox(12, configPanel.getNode(), playbackControls.getNode());
-        leftContent.setPadding(new Insets(14));
+        // ── Left column ───────────────────────────────────────────────
+        VBox leftContent = new VBox(8,
+                configPanel.getNode(),
+                offsetPanel.getNode(),
+                playbackControls.getNode());
+        leftContent.setPadding(new Insets(10));
         leftContent.setFillWidth(true);
 
         ScrollPane leftScroll = new ScrollPane(leftContent);
         leftScroll.setFitToWidth(true);
         leftScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
-        leftScroll.setStyle("-fx-background-color: transparent; -fx-background: transparent;");
-        leftScroll.setMinWidth(320);
-        leftScroll.setPrefWidth(380);
+        leftScroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
+        leftScroll.getStyleClass().add("left-scroll");
 
-        // ── Right panel: media browser grows, chat fixed at bottom ────────
-        VBox right = new VBox(12, mediaPanel.getNode(), chatPanel.getNode());
-        right.setPadding(new Insets(14, 14, 14, 0));
-        right.setFillWidth(true);
+        // ── Centre column ─────────────────────────────────────────────
+        VBox centre = new VBox(mediaPanel.getNode());
+        centre.setPadding(new Insets(10, 8, 10, 0));
+        centre.setFillWidth(true);
         VBox.setVgrow(mediaPanel.getNode(), Priority.ALWAYS);
-        VBox.setVgrow(chatPanel.getNode(),  Priority.NEVER);
 
-        // ── Body: left fixed-ish, right takes all remaining space ─────────
-        HBox body = new HBox(0, leftScroll, right);
-        body.setFillHeight(true);
-        HBox.setHgrow(leftScroll, Priority.NEVER);
-        HBox.setHgrow(right,      Priority.ALWAYS);
+        // ── Right column ──────────────────────────────────────────────
+        VBox right = new VBox(chatPanel.getNode());
+        right.setPadding(new Insets(10, 10, 10, 0));
+        right.setFillWidth(true);
+        VBox.setVgrow(chatPanel.getNode(), Priority.ALWAYS);
 
-        root.setCenter(body);
-        root.setStyle("-fx-background-color: #0f1117;");
+        // ── SplitPane — all three columns user-resizable ──────────────
+        SplitPane split = new SplitPane(leftScroll, centre, right);
+        split.getStyleClass().add("app-split");
+        // Initial divider positions as fractions of total width
+        // left ~27%, centre ~47%, right ~26%
+        split.setDividerPositions(0.27, 0.73);
+
+        root.setCenter(split);
     }
-
-    // ─── Called by ConfigPanel when user clicks Connect ───────────────────
 
     public void onConnect(SessionConfig config) {
         boolean ok = server.connect(config.serverHost, config.serverPort);
@@ -100,19 +93,26 @@ public class MainWindow {
             return;
         }
 
-        syncEngine = new SyncEngine(mpv, server);       // registers its handler via setMessageHandler
-        server.addMessageHandler(msg -> {               // ADDS chat handler on top — doesn't replace
-            Platform.runLater(() -> chatPanel.appendMessage(msg));
-        });
+        syncEngine = new SyncEngine(mpv, server);
+        offsetPanel.setSyncEngine(syncEngine);
+
+        server.addMessageHandler(msg ->
+                Platform.runLater(() -> chatPanel.appendMessage(msg)));
 
         server.joinRoom(config.roomId, config.username);
         headerBar.setConnected(config.serverHost, config.roomId);
         configPanel.onConnected();
         mediaPanel.setMode(config.mode);
         playbackControls.setEnabled(false);
+        headerBar.setOnDisconnect(() -> {
+            server.disconnect();
+            syncEngine.close(); // or just stop heartbeat if you want to keep MPV running
+            headerBar.setDisconnected();
+            playbackControls.setEnabled(false); // or true if local mode should continue
+            chatPanel.appendRaw("[system] Disconnected from server");
+            configPanel.onDisconnected();
+        });
     }
-
-    // ─── Called by MediaPanel when user launches MPV ──────────────────────
 
     public void onLaunch(String mpvUrl) {
         new Thread(() -> {
@@ -123,24 +123,29 @@ public class MainWindow {
                     playbackControls.setEnabled(true);
                     chatPanel.appendRaw("[system] MPV launched ✓");
                 } else {
-                    showError("Failed to launch MPV.\n" +
-                              "Make sure MPV is installed and on your PATH.");
+                    showError("Failed to launch MPV.\nMake sure MPV is installed and on your PATH.");
                 }
             });
+            if (ok) {
+                try { mpv.waitForExit(); } catch (InterruptedException ignored) {}
+                Platform.runLater(this::onMpvClosed);
+            }
         }, "mpv-launcher").start();
+    }
+
+    private void onMpvClosed() {
+        playbackControls.setEnabled(false);
+        chatPanel.appendRaw("[system] MPV closed");
+        mediaPanel.onMpvClosed(true);
     }
 
     public MediaPanel getMediaPanel() { return mediaPanel; }
 
-    // ─── Playback actions (called by PlaybackControls) ────────────────────
-
-    public void doPlay()                    { if (syncEngine.getServerConnection() != null) syncEngine.localPlay();}
-    public void doPause()                   { if (syncEngine.getServerConnection() != null) syncEngine.localPause();}
-    public void doSeek(double pos)          { if (syncEngine.getServerConnection() != null) syncEngine.localSeek(pos);}
-    public void doSkipForward(double secs)  { if (syncEngine.getServerConnection() != null) syncEngine.localSkipForward(secs);}
-    public void doSkipBackward(double secs) { if (syncEngine.getServerConnection() != null) syncEngine.localSkipBackward(secs);}
-
-    // ─── Helpers ──────────────────────────────────────────────────────────
+    public void doPlay()                    { if (syncEngine.getServerConnection() != null) syncEngine.localPlay(); }
+    public void doPause()                   { if (syncEngine.getServerConnection() != null) syncEngine.localPause(); }
+    public void doSeek(double pos)          { if (syncEngine.getServerConnection() != null) syncEngine.localSeek(pos); }
+    public void doSkipForward(double secs)  { if (syncEngine.getServerConnection() != null) syncEngine.localSkipForward(secs); }
+    public void doSkipBackward(double secs) { if (syncEngine.getServerConnection() != null) syncEngine.localSkipBackward(secs); }
 
     public void showError(String msg) {
         Platform.runLater(() -> {

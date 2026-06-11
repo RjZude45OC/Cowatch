@@ -10,20 +10,17 @@ import org.json.JSONObject;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 
-/**
- * Chat panel — shows sync events and user messages.
- */
 public class ChatPanel {
 
     private final ServerConnection server;
     private final VBox node = new VBox(8);
 
-    private final TextArea chatArea  = new TextArea();
+    private final TextArea  chatArea = new TextArea();
     private final TextField input    = new TextField();
     private final Button    sendBtn  = new Button("Send");
 
     private static final DateTimeFormatter TIME_FMT =
-        DateTimeFormatter.ofPattern("HH:mm:ss");
+            DateTimeFormatter.ofPattern("HH:mm:ss");
 
     public ChatPanel(ServerConnection server) {
         this.server = server;
@@ -36,8 +33,9 @@ public class ChatPanel {
 
         chatArea.setEditable(false);
         chatArea.setWrapText(true);
-        chatArea.setPrefRowCount(6);
         chatArea.getStyleClass().add("chat-area");
+        // Let the text area grow to fill all available vertical space
+        VBox.setVgrow(chatArea, Priority.ALWAYS);
 
         input.setPromptText("Type a message…");
         input.setOnAction(e -> handleSend());
@@ -50,47 +48,45 @@ public class ChatPanel {
 
         VBox card = new VBox(8, heading, chatArea, inputRow);
         card.getStyleClass().add("card");
+        card.setFillWidth(true);
         VBox.setVgrow(chatArea, Priority.ALWAYS);
+        // Card itself grows to fill the column
+        VBox.setVgrow(card, Priority.ALWAYS);
 
         node.getChildren().add(card);
-        VBox.setVgrow(card, Priority.NEVER);
+        node.setFillWidth(true);
+        // VBox wrapper also grows
+        VBox.setVgrow(node, Priority.ALWAYS);
     }
 
     private void handleSend() {
         String text = input.getText().trim();
         if (text.isEmpty()) return;
-        if (server.isConnected()) {
-            server.sendChat(text);
-        }
+        if (server.isConnected()) server.sendChat(text);
         appendRaw("[you] " + text);
         input.clear();
     }
 
-    /** Append a raw string (used for system/local messages) */
     public void appendRaw(String msg) {
         String time = LocalTime.now().format(TIME_FMT);
         chatArea.appendText("[" + time + "] " + msg + "\n");
     }
 
-    /** Append a parsed server JSON message with nice formatting */
     public void appendMessage(String rawJson) {
         try {
-            JSONObject obj = new JSONObject(rawJson);
-            String event = obj.optString("event", "");
-            String from  = obj.optString("from",  "?");
-            String data  = obj.optString("data",  "");
+            JSONObject obj  = new JSONObject(rawJson);
+            String event    = obj.optString("event", "");
+            String from     = obj.optString("from",  "?");
+            String data     = obj.optString("data",  "");
 
             String line = switch (event) {
-                case "chat"   -> "[" + from + "] " + data;
-                case "play"   -> "▶ " + from + " pressed play at "
-                                 + formatPos(obj.optDouble("position", 0));
-                case "pause"  -> "⏸ " + from + " paused at "
-                                 + formatPos(obj.optDouble("position", 0));
-                case "seek"   -> "⏩ " + from + " seeked to "
-                                 + formatPos(obj.optDouble("position", 0));
-                case "system", "joined" -> "• " + data;
-                case "error"  -> "⚠ " + data;
-                default       -> rawJson;
+                case "chat"            -> "[" + from + "] " + data;
+                case "play"            -> "▶ " + from + " pressed play at "  + formatPos(obj.optDouble("position", 0));
+                case "pause"           -> "⏸ " + from + " paused at "        + formatPos(obj.optDouble("position", 0));
+                case "seek"            -> "⏩ " + from + " seeked to "        + formatPos(obj.optDouble("position", 0));
+                case "system","joined" -> "• " + data;
+                case "error"           -> "⚠ " + data;
+                default                -> rawJson;
             };
             appendRaw(line);
         } catch (Exception e) {

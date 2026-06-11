@@ -75,14 +75,14 @@ public class ConfigPanel {
             .findFirst()
             .ifPresent(tb -> tb.getStyleClass().add("selected"));
 
-        Label modeDesc = new Label(selectedMode.description);
-        modeDesc.setWrapText(true);
-        modeDesc.getStyleClass().add("subhead");
-        modeGroup.selectedToggleProperty().addListener((obs, old, now) -> {
-            if (now != null) modeDesc.setText(((SyncMode) now.getUserData()).description);
-        });
-
-        VBox modeCard = card(modeHeading, modeRow, modeDesc);
+//        Label modeDesc = new Label(selectedMode.description);
+//        modeDesc.setWrapText(true);
+//        modeDesc.getStyleClass().add("subhead");
+//        modeGroup.selectedToggleProperty().addListener((obs, old, now) -> {
+//            if (now != null) modeDesc.setText(((SyncMode) now.getUserData()).description);
+//        });
+//        VBox modeCard = card(modeHeading, modeRow, modeDesc);
+        VBox modeCard = card(modeHeading, modeRow);
 
         // ── 2. Server config ──────────────────────────────────────────────
         HBox serverRow = new HBox(8,
@@ -129,9 +129,11 @@ public class ConfigPanel {
 
     public void onConnected() {
         connectBtn.setText("Connected ✓");
-        // keep disabled — user should disconnect via close
     }
-
+    public void onDisconnected() {
+        connectBtn.setDisable(false);
+        connectBtn.setText("Connect to Server");
+    }
     public SyncMode getSelectedMode() { return selectedMode; }
 
     // ─── Helpers ──────────────────────────────────────────────────────────
