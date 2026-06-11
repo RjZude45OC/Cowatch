@@ -23,7 +23,7 @@ public class ConfigPanel {
     private final VBox node = new VBox(12);
 
     // Mode
-    private SyncMode selectedMode = SyncMode.JELLYFIN_TO_JELLYFIN;
+    private SyncMode selectedMode = SyncMode.JELLYFIN;
     private final ToggleGroup modeGroup = new ToggleGroup();
 
     // Server fields

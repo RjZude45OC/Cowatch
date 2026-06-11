@@ -16,7 +16,7 @@ public class SyncPlayApp extends Application {
     @Override
     public void start(Stage stage) {
         MainWindow window = new MainWindow(stage);
-        Scene scene = new Scene(window.getRoot(), 1400, 820);
+        Scene scene = new Scene(window.getRoot(), 1400, 800);
         scene.getStylesheets().add(getClass().getResource(CSS_PATH).toExternalForm());
 
         stage.setTitle("SyncPlay");

@@ -40,7 +40,7 @@ public class MediaPanel {
 
     // ── State ─────────────────────────────────────────────────────────────
     private JellyfinClient jellyfinClient;
-    private SyncMode       currentMode = SyncMode.JELLYFIN_TO_JELLYFIN;
+    private SyncMode       currentMode = SyncMode.JELLYFIN;
 
     public MediaPanel(MainWindow owner) {
         this.owner = owner;
@@ -69,7 +69,7 @@ public class MediaPanel {
 
     public void setMode(SyncMode mode) {
         currentMode = mode;
-        if (mode == SyncMode.LOCAL_TO_LOCAL || mode == SyncMode.LOCAL_TO_JELLYFIN) {
+        if (mode == SyncMode.LOCAL) {
             showLocalPanel();
         } else {
             showJellyfinPanel();

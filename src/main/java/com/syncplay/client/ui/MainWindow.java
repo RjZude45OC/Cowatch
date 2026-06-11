@@ -51,11 +51,11 @@ public class MainWindow {
         root.getStyleClass().add("app-root");
 
         // ── Left column ───────────────────────────────────────────────
-        VBox leftContent = new VBox(8,
+        VBox leftContent = new VBox(10,
                 configPanel.getNode(),
                 offsetPanel.getNode(),
                 playbackControls.getNode());
-        leftContent.setPadding(new Insets(10));
+        leftContent.setPadding(new Insets(10, 10, 10, 10));
         leftContent.setFillWidth(true);
 
         ScrollPane leftScroll = new ScrollPane(leftContent);
@@ -63,16 +63,16 @@ public class MainWindow {
         leftScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
         leftScroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
         leftScroll.getStyleClass().add("left-scroll");
-
+        leftScroll.setFitToHeight(true);
         // ── Centre column ─────────────────────────────────────────────
         VBox centre = new VBox(mediaPanel.getNode());
-        centre.setPadding(new Insets(10, 8, 10, 0));
+        centre.setPadding(new Insets(10, 10, 10, 10));
         centre.setFillWidth(true);
         VBox.setVgrow(mediaPanel.getNode(), Priority.ALWAYS);
 
         // ── Right column ──────────────────────────────────────────────
         VBox right = new VBox(chatPanel.getNode());
-        right.setPadding(new Insets(10, 10, 10, 0));
+        right.setPadding(new Insets(10, 10, 10, 10));
         right.setFillWidth(true);
         VBox.setVgrow(chatPanel.getNode(), Priority.ALWAYS);
 
@@ -80,9 +80,8 @@ public class MainWindow {
         SplitPane split = new SplitPane(leftScroll, centre, right);
         split.getStyleClass().add("app-split");
         // Initial divider positions as fractions of total width
-        // left ~27%, centre ~47%, right ~26%
-        split.setDividerPositions(0.27, 0.73);
-
+        // left ~30%, centre ~47%, right ~26%
+        split.setDividerPositions(0.311, 0.73);
         root.setCenter(split);
     }
 
@@ -94,7 +93,6 @@ public class MainWindow {
         }
 
         syncEngine = new SyncEngine(mpv, server);
-        offsetPanel.setSyncEngine(syncEngine);
 
         server.addMessageHandler(msg ->
                 Platform.runLater(() -> chatPanel.appendMessage(msg)));
