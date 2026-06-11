@@ -11,12 +11,12 @@ import javafx.stage.Stage;
 public class SyncPlayApp extends Application {
 
     public static final String CSS_PATH =
-        "/com/syncplay/client/css/dark.css";
+            "/com/syncplay/client/css/dark.css";
 
     @Override
     public void start(Stage stage) {
         MainWindow window = new MainWindow(stage);
-        Scene scene = new Scene(window.getRoot(), 1100, 750);
+        Scene scene = new Scene(window.getRoot(), 1400, 820);
         scene.getStylesheets().add(getClass().getResource(CSS_PATH).toExternalForm());
 
         stage.setTitle("SyncPlay");

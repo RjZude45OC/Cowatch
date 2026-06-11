@@ -19,7 +19,10 @@ public class MPVController {
 
     private static final Logger log = Logger.getLogger(MPVController.class.getName());
 
-    private static final String SOCKET_PATH        = getSocketPath();
+    private static final String INSTANCE_ID  = String.valueOf(ProcessHandle.current().pid());
+    private static final String SOCKET_PATH  = isWindows()
+            ? "\\\\.\\pipe\\mpvsocket_" + INSTANCE_ID
+            : "/tmp/mpvsocket_" + INSTANCE_ID;
     private static final String MPV_BIN            = getMpvBinary();
     private static final int    CONNECT_TIMEOUT_MS = 5_000;
     private static final int    CONNECT_POLL_MS    = 200;
@@ -242,7 +245,9 @@ public class MPVController {
             }
         });
     }
-
+    public void waitForExit() throws InterruptedException {
+        if (mpvProcess != null) mpvProcess.waitFor();
+    }
     // ── SUBSCRIPTIONS ────────────────────────────────────────────
 
     private void subscribeToEvents() {
