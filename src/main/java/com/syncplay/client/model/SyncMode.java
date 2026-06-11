@@ -9,20 +9,13 @@ package com.syncplay.client.model;
  */
 public enum SyncMode {
 
-    LOCAL_TO_LOCAL(
-        "Local ↔ Local",
+    LOCAL(
+        "Local",
         "Both users play a local copy of the same file.\nSync signals are relayed via the SyncPlay server.",
         "🖥"
     ),
-
-    LOCAL_TO_JELLYFIN(
-        "Local ↔ Jellyfin",
-        "One user plays a local file, the other streams from Jellyfin.\nBoth sides sync via the SyncPlay server.",
-        "🔀"
-    ),
-
-    JELLYFIN_TO_JELLYFIN(
-        "Jellyfin ↔ Jellyfin",
+    JELLYFIN(
+        "Jellyfin",
         "Both users stream from the same Jellyfin server.\nThe cleanest option — no file sharing needed.",
         "☁"
     );

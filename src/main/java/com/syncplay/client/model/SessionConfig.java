@@ -37,15 +37,6 @@ public class SessionConfig {
         this.jellyfinUserId  = b.jellyfinUserId;
     }
 
-    /** Build the MPV playback URL based on the mode */
-    public String resolveMpvUrl() {
-        return switch (mode) {
-            case LOCAL_TO_LOCAL -> localFilePath;
-            case LOCAL_TO_JELLYFIN -> localFilePath; // this user plays local
-            case JELLYFIN_TO_JELLYFIN -> buildJellyfinStreamUrl();
-        };
-    }
-
     public String buildJellyfinStreamUrl() {
         if (jellyfinBaseUrl == null || jellyfinItemId == null || jellyfinApiKey == null)
             return null;
@@ -62,7 +53,7 @@ public class SessionConfig {
         private int      serverPort      = 5555;
         private String   roomId          = "room1";
         private String   username        = "User";
-        private SyncMode mode            = SyncMode.JELLYFIN_TO_JELLYFIN;
+        private SyncMode mode            = SyncMode.JELLYFIN;
         private String   localFilePath;
         private String   jellyfinBaseUrl;
         private String   jellyfinApiKey;
