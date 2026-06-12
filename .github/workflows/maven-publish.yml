@@ -58,6 +58,8 @@ jobs:
       # ── macOS ────────────────────────────────────────────────────
       - name: Package (macOS)
         if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: 10.14
         run: |
           jpackage \
             --input target \
