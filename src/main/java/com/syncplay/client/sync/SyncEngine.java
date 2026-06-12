@@ -266,7 +266,10 @@ public class SyncEngine {
 
     public void localSkipForward(double seconds)  { localSeek(lastPos + seconds); }
     public void localSkipBackward(double seconds) { localSeek(Math.max(offsetSeconds, lastPos - seconds)); }
-
+    public void resetStartupWindow() {
+        connectTime = System.currentTimeMillis();
+        paused = true;
+    }
     // ── Offset ────────────────────────────────────────────────────
 
     /**

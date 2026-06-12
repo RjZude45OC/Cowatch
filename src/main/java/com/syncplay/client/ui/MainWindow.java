@@ -124,6 +124,7 @@ public class MainWindow {
     public void onLaunch(String mpvUrl) {
         new Thread(() -> {
             boolean ok = mpv.launch(mpvUrl);
+            if (ok) syncEngine.resetStartupWindow();
             Platform.runLater(() -> {
                 mediaPanel.onMpvLaunched(ok);
                 if (ok) {
