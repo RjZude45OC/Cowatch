@@ -12,10 +12,18 @@ public class SyncEngine {
 
     private static final Logger log = Logger.getLogger(SyncEngine.class.getName());
 
-    private static final double SKIP_THRESHOLD          = 2.5;
-    private static final double SEEK_DEAD_ZONE          = 0.8;
-    private static final long   SUPPRESS_DURATION_MS    = 700;
-    private static final long   SEEK_INSTANT_WINDOW_MS  = 300;
+    private static final double SKIP_THRESHOLD         = 2.5;
+    private static final double SEEK_DEAD_ZONE         = 0.8;
+    private static final long   SUPPRESS_DURATION_MS   = 700;
+    private static final long   SEEK_INSTANT_WINDOW_MS = 300;
+
+    /**
+     * Startup stabilization window (ms).
+     * MPV fires rapid time-pos/pause events during the first ~1s of playback.
+     * We ignore outbound sync during this window to prevent the offset feedback
+     * loop: toRemote(near-zero) = negative → server clamps → seeks back to 0 → loop.
+     */
+    private static final long STARTUP_QUIET_MS = 1_500;
 
     private final MPVController    mpv;
     private final ServerConnection server;
@@ -26,6 +34,9 @@ public class SyncEngine {
     private volatile double  offsetSeconds = 0.0;
 
     private long lastPosTimestamp = 0;
+
+    /** System.currentTimeMillis() when IPC connection was established. */
+    private long connectTime = System.currentTimeMillis();
 
     private final AtomicBoolean suppressMpvEvents = new AtomicBoolean(false);
 
@@ -44,6 +55,8 @@ public class SyncEngine {
         hookEvents();
     }
 
+    // ── Wiring ────────────────────────────────────────────────────
+
     private void hookEvents() {
         mpv.setEventListener(this::onMpvEvent);
         if (isSynced()) server.addMessageHandler(this::onServerEvent);
@@ -53,33 +66,51 @@ public class SyncEngine {
         if (server != null) server.addMessageHandler(this::onServerEvent);
     }
 
+    /** Call when MPV IPC connects so startup quiet window is measured correctly. */
+    public void onMpvConnected() {
+        connectTime = System.currentTimeMillis();
+    }
+
     public boolean isSynced() {
         return server != null && server.isConnected();
     }
 
-    // ── Offset helpers ────────────────────────────────────────────
-    //
-    // offsetSeconds = how many seconds ahead YOUR file is vs the shared timeline.
-    // User 2 has 5s of extra intro → offsetSeconds = 5.
-    //
-    //   local position 8s  →  remote = 8 - 5 = 3s  (what others see)
-    //   remote event   3s  →  local  = 3 + 5 = 8s  (where to seek in your file)
-    //
-    // The minimum valid LOCAL position is offsetSeconds:
-    //   seeking below that would be into the extra intro that others don't have.
+    /** True during the startup quiet window — don't broadcast outbound events. */
+    private boolean inStartupWindow() {
+        return System.currentTimeMillis() - connectTime < STARTUP_QUIET_MS;
+    }
 
-    private double toRemote(double localPos)  { return localPos - offsetSeconds; }
-    private double toLocal(double remotePos)  { return remotePos + offsetSeconds; }
+    // ── Offset / duration helpers ─────────────────────────────────
+
+    private double toRemote(double localPos) { return localPos - offsetSeconds; }
+    private double toLocal(double remotePos) { return remotePos + offsetSeconds; }
 
     /**
-     * Clamp a local seek target:
-     *   lower = offsetSeconds  (never seek into the "extra intro" zone)
-     *   upper = mediaDuration  (never seek past end of file)
+     * Clamp remote position to >= 0 before sending to server.
+     *
+     * Root cause of the feedback loop:
+     *   offset=+1, local=0.04 → toRemote(0.04) = -0.96
+     *   Server broadcasts -0.96 to user1 (offset=0)
+     *   User1: toLocal(-0.96) = -0.96 → clampLocal → 0 → seekTo(0)
+     *   User1 broadcasts seek(0) → user2: toLocal(0) = 1 → seekTo(1)
+     *   User2 MPV fires time-pos(1) → toRemote(1) = 0 → broadcasts seek(0)
+     *   → user1 seeks to 0 → loop forever
+     *
+     * Fix: never send a negative remote position. If toRemote produces < 0,
+     * clamp to 0. Receivers will compute toLocal(0) = offset, which is the
+     * correct earliest playable position for a user with that offset.
+     */
+    private double clampRemote(double remotePos) {
+        return Math.max(0.0, remotePos);
+    }
+
+    /**
+     * Clamp local position to [0, mediaDuration].
+     * Prevents offset pushing a remote position past this file's boundaries.
      */
     private double clampLocal(double pos) {
-        double lo = offsetSeconds;                                          // FIX 1
         double hi = mediaDuration > 0 ? mediaDuration : Double.MAX_VALUE;
-        return Math.max(lo, Math.min(pos, hi));
+        return Math.max(0.0, Math.min(pos, hi));
     }
 
     // ── MPV → Server ──────────────────────────────────────────────
@@ -118,27 +149,34 @@ public class SyncEngine {
 
     private void handlePositionChange(double newPos) {
         long   now  = System.currentTimeMillis();
-        long   gap  = now - lastPosTimestamp;
+        long   gap  = lastPosTimestamp == 0 ? Long.MAX_VALUE : now - lastPosTimestamp;
         double prev = lastPos;
 
         lastPos          = newPos;
         lastPosTimestamp = now;
 
-        if (suppressMpvEvents.get()) return;
+        // Enforce offset floor — user must not play below offsetSeconds locally.
+        // If MPV seeks below the floor (via arrow keys, progress bar etc.),
+        // snap it back. suppressMpvEvents prevents the snap from re-triggering
+        // this handler or broadcasting to server.
+        if (!suppressMpvEvents.get() && newPos < offsetSeconds) {
+            log.info(String.format(
+                    "Below offset floor %.2fs (local=%.2fs) — snapping back",
+                    offsetSeconds, newPos));
+            applyRemote(() -> mpv.seekTo(offsetSeconds));
+            lastPos = offsetSeconds;
+            return;
+        }
+
+        // Don't broadcast during suppress or startup window
+        if (suppressMpvEvents.get() || inStartupWindow()) return;
 
         double delta = newPos - prev;
 
-        if (Math.abs(delta) > SKIP_THRESHOLD) {
-            boolean isInstantJump = (lastPosTimestamp != 0) && (gap < SEEK_INSTANT_WINDOW_MS);
-            if (isInstantJump) {
-                log.info(String.format(
-                        "Seek in MPV: %.2f → %.2f (Δ%.1fs, gap %dms, remote=%.2f)",
-                        prev, newPos, delta, gap, toRemote(newPos)));
-                if (isSynced()) server.sendSeek(toRemote(newPos));
-            } else {
-                log.fine(String.format(
-                        "Ignored catch-up: %.2f → %.2f (gap %dms)", prev, newPos, gap));
-            }
+        if (Math.abs(delta) > SKIP_THRESHOLD && gap < SEEK_INSTANT_WINDOW_MS) {
+            log.info(String.format("Seek: %.2f→%.2f Δ%.1fs gap %dms",
+                    prev, newPos, delta, gap));
+            if (isSynced()) server.sendSeek(clampRemote(toRemote(newPos)));
         }
     }
 
@@ -146,16 +184,17 @@ public class SyncEngine {
         boolean wasPaused = paused;
         paused = nowPaused;
 
-        if (suppressMpvEvents.get()) return;
+        // Don't broadcast during suppress or startup window
+        if (suppressMpvEvents.get() || inStartupWindow()) return;
 
         if (nowPaused && !wasPaused) {
-            log.info(String.format("MPV paused   local=%.2fs remote=%.2fs offset=%.2fs",
-                    lastPos, toRemote(lastPos), offsetSeconds));
-            if (isSynced()) server.sendPause(toRemote(lastPos));
+            log.info(String.format("Paused at %.2fs (remote %.2fs)",
+                    lastPos, toRemote(lastPos)));
+            if (isSynced()) server.sendPause(clampRemote(toRemote(lastPos)));
         } else if (!nowPaused && wasPaused) {
-            log.info(String.format("MPV playing  local=%.2fs remote=%.2fs offset=%.2fs",
-                    lastPos, toRemote(lastPos), offsetSeconds));
-            if (isSynced()) server.sendPlay(toRemote(lastPos));
+            log.info(String.format("Playing at %.2fs (remote %.2fs)",
+                    lastPos, toRemote(lastPos)));
+            if (isSynced()) server.sendPlay(clampRemote(toRemote(lastPos)));
         }
     }
 
@@ -177,7 +216,7 @@ public class SyncEngine {
             switch (event) {
                 case "play" -> {
                     double localTarget = clampLocal(toLocal(position + age));
-                    log.info(String.format("%s → play  remote=%.2f local=%.2f", from, position, localTarget));
+                    log.info(from + " → play remote=" + position + " local=" + localTarget);
                     applyRemote(() -> {
                         if (Math.abs(lastPos - localTarget) > SEEK_DEAD_ZONE)
                             mpv.seekTo(localTarget);
@@ -186,7 +225,7 @@ public class SyncEngine {
                 }
                 case "pause" -> {
                     double localTarget = clampLocal(toLocal(position));
-                    log.info(String.format("%s → pause remote=%.2f local=%.2f", from, position, localTarget));
+                    log.info(from + " → pause remote=" + position + " local=" + localTarget);
                     applyRemote(() -> {
                         mpv.pause();
                         if (Math.abs(lastPos - localTarget) > SEEK_DEAD_ZONE)
@@ -195,7 +234,7 @@ public class SyncEngine {
                 }
                 case "seek" -> {
                     double localTarget = clampLocal(toLocal(position + age));
-                    log.info(String.format("%s → seek  remote=%.2f local=%.2f", from, position, localTarget));
+                    log.info(from + " → seek remote=" + position + " local=" + localTarget);
                     if (Math.abs(lastPos - localTarget) > SEEK_DEAD_ZONE)
                         applyRemote(() -> mpv.seekTo(localTarget));
                 }
@@ -212,7 +251,8 @@ public class SyncEngine {
         suppressScheduler.schedule(
                 () -> suppressMpvEvents.set(false),
                 SUPPRESS_DURATION_MS,
-                TimeUnit.MILLISECONDS);
+                TimeUnit.MILLISECONDS
+        );
     }
 
     // ── Public controls ───────────────────────────────────────────
@@ -220,53 +260,38 @@ public class SyncEngine {
     public void localPlay() {
         double pos = lastPos;
         mpv.play();
-        if (isSynced()) server.sendPlay(toRemote(pos));
+        if (isSynced()) server.sendPlay(clampRemote(toRemote(pos)));
     }
 
     public void localPause() {
         double pos = lastPos;
         mpv.pause();
-        if (isSynced()) server.sendPause(toRemote(pos));
+        if (isSynced()) server.sendPause(clampRemote(toRemote(pos)));
     }
 
     public void localSeek(double position) {
-        double clamped = clampLocal(position);                              // FIX 2
-        lastPos = clamped;
-        mpv.seekTo(clamped);
-        if (isSynced()) server.sendSeek(toRemote(clamped));
+        lastPos = position;
+        mpv.seekTo(position);
+        if (isSynced()) server.sendSeek(clampRemote(toRemote(position)));
     }
 
-    public void localSkipForward(double seconds) {
-        localSeek(lastPos + seconds);
-    }
-
-    public void localSkipBackward(double seconds) {
-        localSeek(lastPos - seconds);                                       // FIX 3
-        // clampLocal inside localSeek enforces the offsetSeconds floor —
-        // no separate Math.max(0,...) here so the offset limit is respected.
-    }
+    public void localSkipForward(double seconds)  { localSeek(lastPos + seconds); }
+    public void localSkipBackward(double seconds) { localSeek(Math.max(offsetSeconds, lastPos - seconds)); }
 
     // ── Offset ────────────────────────────────────────────────────
 
     /**
-     * Set playback offset in seconds.
-     *
-     * Positive = your file has N extra seconds at the start that others don't.
-     * User 2 sets offset=5 → local position 5s = remote position 0s.
-     *
-     * After changing offset, if MPV is already playing, snap to the new
-     * equivalent of the current remote position so playback stays in sync.
+     * Set offset and reset startup window so the new offset stabilizes
+     * before outbound events fire.
      */
     public void setOffset(double seconds) {
-        double remoteNow = toRemote(lastPos);   // current remote pos before change
         this.offsetSeconds = seconds;
+        this.connectTime   = System.currentTimeMillis(); // re-arm quiet window
         log.info(String.format("Offset set to %.3fs", seconds));
 
-        // If MPV is running, re-seek to keep the remote position stable
         if (mpv.isRunning()) {
-            double newLocal = clampLocal(toLocal(remoteNow));
             suppressMpvEvents.set(true);
-            mpv.seekTo(newLocal);
+            mpv.seekTo(seconds);
             suppressScheduler.schedule(
                     () -> suppressMpvEvents.set(false),
                     SUPPRESS_DURATION_MS,
