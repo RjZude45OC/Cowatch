@@ -23,7 +23,6 @@ public class OffsetPanel {
 
         Label title = heading("Playback Offset");
 
-        // Value display — uses offset-value class for monospaced centred styling
         valueLabel.getStyleClass().add("offset-value");
         valueLabel.setMaxWidth(Double.MAX_VALUE);
 
@@ -32,7 +31,6 @@ public class OffsetPanel {
         Button mSmall = adjBtn("−0.1 s", -0.1);
         Button pSmall = adjBtn("+0.1 s", +0.1);
 
-        // Row 1: coarse ±1 s flanking value display
         HBox coarseRow = new HBox(8, mBig, valueLabel, pBig);
         coarseRow.setAlignment(Pos.CENTER);
         HBox.setHgrow(valueLabel, Priority.ALWAYS);
@@ -41,7 +39,6 @@ public class OffsetPanel {
         HBox.setHgrow(mBig, Priority.SOMETIMES);
         HBox.setHgrow(pBig, Priority.SOMETIMES);
 
-        // Row 2: fine ±0.1 s full width
         mSmall.setMaxWidth(Double.MAX_VALUE);
         pSmall.setMaxWidth(Double.MAX_VALUE);
         HBox.setHgrow(mSmall, Priority.ALWAYS);
@@ -87,6 +84,9 @@ public class OffsetPanel {
         l.getStyleClass().add("heading");
         return l;
     }
+
+    /** Returns the current offset value — used by MainWindow to preserve it across reconnect. */
+    public double getOffset() { return offset; }
 
     public void setSyncEngine(SyncEngine engine) {
         this.syncEngine = engine;

@@ -50,40 +50,37 @@ public class MainWindow {
         root.setTop(headerBar.getNode());
         root.getStyleClass().add("app-root");
 
-        // ── Left column ───────────────────────────────────────────────
         VBox leftContent = new VBox(10,
                 configPanel.getNode(),
                 offsetPanel.getNode(),
                 playbackControls.getNode());
-        leftContent.setPadding(new Insets(10, 10, 10, 10));
+        leftContent.setPadding(new Insets(10));
         leftContent.setFillWidth(true);
 
         ScrollPane leftScroll = new ScrollPane(leftContent);
         leftScroll.setFitToWidth(true);
+        leftScroll.setFitToHeight(true);
         leftScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
         leftScroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
         leftScroll.getStyleClass().add("left-scroll");
-        leftScroll.setFitToHeight(true);
-        // ── Centre column ─────────────────────────────────────────────
+
         VBox centre = new VBox(mediaPanel.getNode());
-        centre.setPadding(new Insets(10, 10, 10, 10));
+        centre.setPadding(new Insets(10));
         centre.setFillWidth(true);
         VBox.setVgrow(mediaPanel.getNode(), Priority.ALWAYS);
 
-        // ── Right column ──────────────────────────────────────────────
         VBox right = new VBox(chatPanel.getNode());
-        right.setPadding(new Insets(10, 10, 10, 10));
+        right.setPadding(new Insets(10));
         right.setFillWidth(true);
         VBox.setVgrow(chatPanel.getNode(), Priority.ALWAYS);
 
-        // ── SplitPane — all three columns user-resizable ──────────────
         SplitPane split = new SplitPane(leftScroll, centre, right);
         split.getStyleClass().add("app-split");
-        // Initial divider positions as fractions of total width
-        // left ~30%, centre ~47%, right ~26%
         split.setDividerPositions(0.311, 0.73);
         root.setCenter(split);
     }
+
+    // ── Connect ───────────────────────────────────────────────────────────
 
     public void onConnect(SessionConfig config) {
         boolean ok = server.connect(config.serverHost, config.serverPort);
@@ -92,7 +89,11 @@ public class MainWindow {
             return;
         }
 
+        double savedOffset = offsetPanel.getOffset();
+
         syncEngine = new SyncEngine(mpv, server);
+        syncEngine.setOffset(savedOffset);
+        offsetPanel.setSyncEngine(syncEngine);
 
         server.addMessageHandler(msg ->
                 Platform.runLater(() -> chatPanel.appendMessage(msg)));
@@ -100,17 +101,27 @@ public class MainWindow {
         server.joinRoom(config.roomId, config.username);
         headerBar.setConnected(config.serverHost, config.roomId);
         configPanel.onConnected();
-        mediaPanel.setMode(config.mode);
-        playbackControls.setEnabled(false);
+        mediaPanel.setMode(config.mode);       // keep — but don't reset file selection
+
+        // Only disable controls if MPV isn't already running
+        if (!mpv.isRunning()) {
+            playbackControls.setEnabled(false);
+        }
+
         headerBar.setOnDisconnect(() -> {
             server.disconnect();
-            syncEngine.close(); // or just stop heartbeat if you want to keep MPV running
+            syncEngine.close();
             headerBar.setDisconnected();
-            playbackControls.setEnabled(false); // or true if local mode should continue
+            // Only disable controls if MPV closed too
+            if (!mpv.isRunning()) {
+                playbackControls.setEnabled(false);
+            }
             chatPanel.appendRaw("[system] Disconnected from server");
             configPanel.onDisconnected();
         });
     }
+
+    // ── Launch ────────────────────────────────────────────────────────────
 
     public void onLaunch(String mpvUrl) {
         new Thread(() -> {
@@ -137,13 +148,17 @@ public class MainWindow {
         mediaPanel.onMpvClosed(true);
     }
 
+    // ── Playback actions ──────────────────────────────────────────────────
+
     public MediaPanel getMediaPanel() { return mediaPanel; }
 
-    public void doPlay()                    { if (syncEngine.getServerConnection() != null) syncEngine.localPlay(); }
-    public void doPause()                   { if (syncEngine.getServerConnection() != null) syncEngine.localPause(); }
-    public void doSeek(double pos)          { if (syncEngine.getServerConnection() != null) syncEngine.localSeek(pos); }
-    public void doSkipForward(double secs)  { if (syncEngine.getServerConnection() != null) syncEngine.localSkipForward(secs); }
-    public void doSkipBackward(double secs) { if (syncEngine.getServerConnection() != null) syncEngine.localSkipBackward(secs); }
+    public void doPlay()                    { syncEngine.localPlay(); }
+    public void doPause()                   { syncEngine.localPause(); }
+    public void doSeek(double pos)          { syncEngine.localSeek(pos); }
+    public void doSkipForward(double secs)  { syncEngine.localSkipForward(secs); }
+    public void doSkipBackward(double secs) { syncEngine.localSkipBackward(secs); }
+
+    // ── Helpers ───────────────────────────────────────────────────────────
 
     public void showError(String msg) {
         Platform.runLater(() -> {

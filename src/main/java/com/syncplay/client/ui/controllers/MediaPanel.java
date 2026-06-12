@@ -40,7 +40,8 @@ public class MediaPanel {
 
     // ── State ─────────────────────────────────────────────────────────────
     private JellyfinClient jellyfinClient;
-    private SyncMode       currentMode = SyncMode.JELLYFIN;
+    private SyncMode       currentMode        = SyncMode.JELLYFIN;
+    private String         savedLocalFilePath = "";   // persists across mode switches
 
     public MediaPanel(MainWindow owner) {
         this.owner = owner;
@@ -68,6 +69,7 @@ public class MediaPanel {
     // ── Mode switching ────────────────────────────────────────────────────
 
     public void setMode(SyncMode mode) {
+        if (mode == currentMode) return;   // no rebuild if unchanged — preserves UI state
         currentMode = mode;
         if (mode == SyncMode.LOCAL) {
             showLocalPanel();
@@ -87,7 +89,6 @@ public class MediaPanel {
         jellyfinPassField.setPromptText("password");
         jellyfinPassField.setMaxWidth(Double.MAX_VALUE);
 
-        // Status uses CSS classes — no more inline setStyle
         jellyfinStatus.getStyleClass().addAll("subhead", "jellyfin-status-pending");
         jellyfinStatus.setText("Not connected");
 
@@ -104,7 +105,6 @@ public class MediaPanel {
                 jellyfinStatus);
         loginBox.getStyleClass().add("jellyfin-login");
 
-        // Library browser
         showsList.setPlaceholder(new Label("Connect to Jellyfin to browse"));
         showsList.setPrefHeight(120);
         showsList.setMinHeight(80);
@@ -127,7 +127,8 @@ public class MediaPanel {
         episodesList.setMinHeight(80);
         VBox.setVgrow(episodesList, Priority.ALWAYS);
 
-        launchJfBtn.getStyleClass().add("green");
+        if (!launchJfBtn.getStyleClass().contains("green"))
+            launchJfBtn.getStyleClass().add("green");
         launchJfBtn.setMaxWidth(Double.MAX_VALUE);
         launchJfBtn.setDisable(true);
         launchJfBtn.setOnAction(e -> handleJellyfinLaunch());
@@ -162,7 +163,8 @@ public class MediaPanel {
             File file = fc.showOpenDialog(
                     node.getScene() != null ? node.getScene().getWindow() : null);
             if (file != null) {
-                localFileField.setText(file.getAbsolutePath());
+                savedLocalFilePath = file.getAbsolutePath();
+                localFileField.setText(savedLocalFilePath);
                 launchLocalBtn.setDisable(false);
             }
         });
@@ -171,10 +173,18 @@ public class MediaPanel {
         localFileField.setMaxWidth(Double.MAX_VALUE);
         localFileField.setPromptText("Click Browse to pick a file…");
 
-        launchLocalBtn.getStyleClass().add("green");
+        if (!launchLocalBtn.getStyleClass().contains("green"))
+            launchLocalBtn.getStyleClass().add("green");
         launchLocalBtn.setMaxWidth(Double.MAX_VALUE);
-        launchLocalBtn.setDisable(true);
         launchLocalBtn.setOnAction(e -> handleLocalLaunch());
+
+        // Restore saved state LAST — overrides any setDisable(true) above
+        if (!savedLocalFilePath.isEmpty()) {
+            localFileField.setText(savedLocalFilePath);
+            launchLocalBtn.setDisable(false);
+        } else {
+            launchLocalBtn.setDisable(true);
+        }
 
         HBox fileRow = new HBox(8, localFileField, browseBtn);
         HBox.setHgrow(localFileField, Priority.ALWAYS);
@@ -263,10 +273,6 @@ public class MediaPanel {
         }, "jellyfin-auth").start();
     }
 
-    /**
-     * Updates jellyfinStatus text and swaps CSS state class.
-     * state: "pending" | "ok" | "error"
-     */
     private void setJellyfinStatus(String text, String state) {
         jellyfinStatus.setText(text);
         jellyfinStatus.getStyleClass()
