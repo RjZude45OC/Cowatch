@@ -85,7 +85,9 @@ public class PlaybackControls {
 
         VBox card = new VBox(8, heading, playRow, skipRow, seekRow, posLabel);
         card.getStyleClass().add("card");
+        VBox.setVgrow(card, Priority.ALWAYS);
         node.getChildren().add(card);
+        VBox.setVgrow(node, Priority.ALWAYS);
     }
 
     private void handleSeek() {

@@ -56,7 +56,10 @@ public class OffsetPanel {
         reset.setOnAction(e -> applyOffset(0.0));
 
         VBox card = card(title, coarseRow, fineRow, hint, reset);
+        VBox.setVgrow(card, Priority.ALWAYS);
         node.getChildren().add(card);
+        node.setFillWidth(true);
+        VBox.setVgrow(node, Priority.ALWAYS);
     }
 
     private void applyOffset(double value) {

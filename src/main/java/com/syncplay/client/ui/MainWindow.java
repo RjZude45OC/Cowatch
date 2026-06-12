@@ -51,36 +51,31 @@ public class MainWindow {
         root.getStyleClass().add("app-root");
 
         // ── Left column ───────────────────────────────────────────────
+        // Connection card has fixed height; offset + playback grow to fill.
+        VBox.setVgrow(offsetPanel.getNode(),      Priority.ALWAYS);
+        VBox.setVgrow(playbackControls.getNode(), Priority.ALWAYS);
+
         VBox leftContent = new VBox(8,
-                configPanel.getNode(),
+                configPanel.getNode(),        // connection only (no sync mode)
                 offsetPanel.getNode(),
                 playbackControls.getNode());
         leftContent.setPadding(new Insets(10));
         leftContent.setFillWidth(true);
 
-        ScrollPane leftScroll = new ScrollPane(leftContent);
-        leftScroll.setFitToWidth(true);
-        // Do NOT setFitToHeight(true) — that squashes content when window is short.
-        // The VBox sizes to its natural height; scroll appears only when needed.
-        leftScroll.setFitToHeight(false);
-        leftScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
-        leftScroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
-        leftScroll.getStyleClass().add("left-scroll");
+        // No ScrollPane — left column resizes with the window.
 
-        // ── Centre column ─────────────────────────────────────────────
+        // ── Centre + Right (unchanged) ────────────────────────────────
         VBox centre = new VBox(mediaPanel.getNode());
         centre.setPadding(new Insets(10));
         centre.setFillWidth(true);
         VBox.setVgrow(mediaPanel.getNode(), Priority.ALWAYS);
 
-        // ── Right column ──────────────────────────────────────────────
         VBox right = new VBox(chatPanel.getNode());
         right.setPadding(new Insets(10));
         right.setFillWidth(true);
         VBox.setVgrow(chatPanel.getNode(), Priority.ALWAYS);
 
-        // ── SplitPane ─────────────────────────────────────────────────
-        SplitPane split = new SplitPane(leftScroll, centre, right);
+        SplitPane split = new SplitPane(leftContent, centre, right);
         split.getStyleClass().add("app-split");
         split.setDividerPositions(0.27, 0.72);
         root.setCenter(split);
