@@ -13,7 +13,6 @@ import javafx.scene.layout.*;
 import javafx.stage.Stage;
 
 import java.io.IOException;
-import java.rmi.ServerError;
 
 public class MainWindow {
 
@@ -168,9 +167,6 @@ public class MainWindow {
     }
     public void showError(String msg) {
         showError(msg, null);
-    }
-    public void appendChat(String msg) {
-        Platform.runLater(() -> chatPanel.appendRaw(msg));
     }
 
     private void wireShutdown() {

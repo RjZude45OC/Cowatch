@@ -8,7 +8,6 @@ import javafx.scene.layout.*;
 
 /**
  * Playback controls panel.
- *
  *  [ ⏮ -30s ] [ ← -5s ] [ ▶ Play ] [ ⏸ Pause ] [ +5s → ] [ +30s ⏭ ]
  *  Seek to: [___] s  [Go]
  *  Position: 00:14:32
@@ -108,13 +107,6 @@ public class PlaybackControls {
         fwd30Btn.setDisable(!enabled);
         seekBtn.setDisable(!enabled);
         seekField.setDisable(!enabled);
-    }
-
-    public void updatePosition(double seconds) {
-        int h = (int) seconds / 3600;
-        int m = (int) (seconds % 3600) / 60;
-        int s = (int) seconds % 60;
-        posLabel.setText(String.format("Position: %02d:%02d:%02d", h, m, s));
     }
 
     public VBox getNode() { return node; }

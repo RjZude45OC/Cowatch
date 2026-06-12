@@ -62,15 +62,6 @@ public class SyncEngine {
         if (isSynced()) server.addMessageHandler(this::onServerEvent);
     }
 
-    public void onServerConnected() {
-        if (server != null) server.addMessageHandler(this::onServerEvent);
-    }
-
-    /** Call when MPV IPC connects so startup quiet window is measured correctly. */
-    public void onMpvConnected() {
-        connectTime = System.currentTimeMillis();
-    }
-
     public boolean isSynced() {
         return server != null && server.isConnected();
     }
@@ -87,7 +78,6 @@ public class SyncEngine {
 
     /**
      * Clamp remote position to >= 0 before sending to server.
-     *
      * Root cause of the feedback loop:
      *   offset=+1, local=0.04 → toRemote(0.04) = -0.96
      *   Server broadcasts -0.96 to user1 (offset=0)
@@ -95,7 +85,6 @@ public class SyncEngine {
      *   User1 broadcasts seek(0) → user2: toLocal(0) = 1 → seekTo(1)
      *   User2 MPV fires time-pos(1) → toRemote(1) = 0 → broadcasts seek(0)
      *   → user1 seeks to 0 → loop forever
-     *
      * Fix: never send a negative remote position. If toRemote produces < 0,
      * clamp to 0. Receivers will compute toLocal(0) = offset, which is the
      * correct earliest playable position for a user with that offset.
@@ -298,17 +287,6 @@ public class SyncEngine {
                     TimeUnit.MILLISECONDS);
         }
     }
-
-    public double getOffset() { return offsetSeconds; }
-
-    // ── Accessors ─────────────────────────────────────────────────
-
-    public double           getLastPos()          { return lastPos; }
-    public boolean          isPaused()            { return paused; }
-    public boolean          isLocalMode()         { return !isSynced(); }
-    public double           getMediaDuration()    { return mediaDuration; }
-    public ServerConnection getServerConnection() { return server; }
-
     // ── Shutdown ──────────────────────────────────────────────────
 
     public void close() { suppressScheduler.shutdownNow(); }

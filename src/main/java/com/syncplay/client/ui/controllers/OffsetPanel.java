@@ -21,7 +21,7 @@ public class OffsetPanel {
     private void build() {
         node.setPadding(new Insets(0));
 
-        Label title = heading("Playback Offset");
+        Label title = heading();
 
         valueLabel.getStyleClass().add("offset-value");
         valueLabel.setMaxWidth(Double.MAX_VALUE);
@@ -82,8 +82,8 @@ public class OffsetPanel {
         return c;
     }
 
-    private Label heading(String text) {
-        Label l = new Label(text);
+    private Label heading() {
+        Label l = new Label("Playback Offset");
         l.getStyleClass().add("heading");
         return l;
     }

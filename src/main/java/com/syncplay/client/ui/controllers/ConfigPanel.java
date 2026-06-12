@@ -14,12 +14,10 @@ import java.util.Properties;
 
 /**
  * Left-side configuration panel.
- *
  * Sections:
  *  1. Sync mode selector
  *  2. Connection card: host, port, username  (room removed — server handles rooms)
  *  3. Connect + Save buttons
- *
  * Settings are persisted to  %APPDATA%\SyncPlay\syncplay.properties
  * (or ~/.config/syncplay/syncplay.properties on Linux/macOS).
  */
@@ -80,7 +78,7 @@ public class ConfigPanel {
         // Host + Port on one row, Username below full-width
         HBox hostRow = new HBox(8,
                 labeled("Host", hostField),
-                labeledFixed("Port", portField, 70));
+                labeledFixed(portField));
 
         VBox connCard = card(
                 heading("Connection"),
@@ -133,7 +131,6 @@ public class ConfigPanel {
 
     public void onConnected()    { connectBtn.setText("Connected ✓"); }
     public void onDisconnected() { connectBtn.setDisable(false); connectBtn.setText("Connect"); }
-    public SyncMode getSelectedMode() { return selectedMode; }
 
     // ── Preferences persistence ───────────────────────────────────────────
 
@@ -219,13 +216,12 @@ public class ConfigPanel {
     }
 
     /** Fixed-width labeled column (e.g. Port). */
-    private VBox labeledFixed(String labelText, Control field, double width) {
-        Label lbl = new Label(labelText);
+    private VBox labeledFixed(Control field) {
+        Label lbl = new Label("Port");
         lbl.getStyleClass().add("muted");
-        field.setPrefWidth(width);
-        field.setMaxWidth(width);
-        VBox col = new VBox(3, lbl, field);
-        return col;
+        field.setPrefWidth(70);
+        field.setMaxWidth(70);
+        return new VBox(3, lbl, field);
     }
 
     private TextField field(String prompt) {
