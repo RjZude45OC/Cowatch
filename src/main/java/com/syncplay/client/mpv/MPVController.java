@@ -307,15 +307,20 @@ public class MPVController {
 
     public void sendRaw(String json) {
         String clean = json.strip();
-        log.info("MPV: play" + clean);
         if (clean.isEmpty()) return;
         synchronized (writeLock) {
-            if (writeStream == null) return;
+            if (writeStream == null) {
+                log.warning("sendRaw: writeStream is null, dropping: " + clean);
+                return;
+            }
             try {
-                writeStream.write((clean + "\n").getBytes());
+                byte[] bytes = (clean + "\n").getBytes();
+                log.info("sendRaw → " + clean);
+                writeStream.write(bytes);
                 writeStream.flush();
+                log.info("sendRaw ✓ flushed " + bytes.length + " bytes");
             } catch (Exception e) {
-                log.warning("Failed to send MPV command: " + e.getMessage());
+                log.warning("sendRaw FAILED: " + e.getClass().getSimpleName() + ": " + e.getMessage() + " | cmd=" + clean);
             }
         }
     }
