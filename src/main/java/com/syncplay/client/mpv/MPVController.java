@@ -284,7 +284,6 @@ public class MPVController {
     // ── PLAYBACK CONTROLS ────────────────────────────────────────
 
     public void play()  {
-        log.info("before sent play");
         sendRaw("{\"command\":[\"set_property\",\"pause\",false]}");
         log.info("MPV: play");
     }
@@ -306,9 +305,9 @@ public class MPVController {
 
     public void sendRaw(String json) {
         String clean = json.strip();
-        log.info("MPV: play" + clean);
         if (clean.isEmpty()) return;
         synchronized (writeLock) {
+            log.info(String.valueOf(writeStream == null));
             if (writeStream == null) return;
             try {
                 writeStream.write((clean + "\n").getBytes());
