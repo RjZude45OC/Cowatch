@@ -249,13 +249,13 @@ public class SyncEngine {
     public void localPlay() {
         double pos = lastPos;
         log.info("localPlay — lastPos=" + lastPos + " mpv=" + mpv);
-        mpv.play();
+        applyRemote(mpv::play);  // suppress the echo from MPV
         if (isSynced()) server.sendPlay(clampRemote(toRemote(pos)));
     }
 
     public void localPause() {
         double pos = lastPos;
-        mpv.pause();
+        applyRemote(mpv::pause);
         if (isSynced()) server.sendPause(clampRemote(toRemote(pos)));
     }
 
