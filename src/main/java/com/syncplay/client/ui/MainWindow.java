@@ -12,6 +12,9 @@ import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import javafx.stage.Stage;
 
+import java.io.IOException;
+import java.rmi.ServerError;
+
 public class MainWindow {
 
     private final Stage      stage;
@@ -83,11 +86,10 @@ public class MainWindow {
 
     // ── Connect ───────────────────────────────────────────────────────────
 
-    public void onConnect(SessionConfig config) {
+    public void onConnect(SessionConfig config) throws IOException {
         boolean ok = server.connect(config.serverHost, config.serverPort);
         if (!ok) {
-            showError("Could not connect to " + config.serverHost + ":" + config.serverPort);
-            return;
+            throw new IOException("Could not connect to " + config.serverHost + ":" + config.serverPort);
         }
 
         double savedOffset = offsetPanel.getOffset();
@@ -155,15 +157,18 @@ public class MainWindow {
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
-    public void showError(String msg) {
+    public void showError(String msg, Runnable onClose) {
         Platform.runLater(() -> {
             Alert alert = new Alert(Alert.AlertType.ERROR, msg, ButtonType.OK);
             alert.setTitle("SyncPlay Error");
             alert.initOwner(stage);
-            alert.show();
+            alert.showAndWait();
+            if (onClose != null) onClose.run();
         });
     }
-
+    public void showError(String msg) {
+        showError(msg, null);
+    }
     public void appendChat(String msg) {
         Platform.runLater(() -> chatPanel.appendRaw(msg));
     }

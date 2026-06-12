@@ -113,7 +113,7 @@ public class ConfigPanel {
             SessionConfig config = SessionConfig.builder()
                     .serverHost(hostField.getText().trim())
                     .serverPort(port)
-                    .roomId("room1")           // default room; expose field if needed
+                    .roomId("room1")
                     .username(userField.getText().trim())
                     .mode(selectedMode)
                     .build();
@@ -121,9 +121,13 @@ public class ConfigPanel {
             connectBtn.setDisable(true);
             connectBtn.setText("Connecting…");
             owner.onConnect(config);
-
         } catch (NumberFormatException ex) {
             owner.showError("Port must be a number.");
+        } catch (IOException e) {
+            owner.showError(e.getMessage(), () -> {
+                connectBtn.setDisable(false);
+                connectBtn.setText("Connect");
+            });
         }
     }
 
