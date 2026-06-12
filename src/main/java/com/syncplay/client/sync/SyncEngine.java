@@ -248,6 +248,7 @@ public class SyncEngine {
 
     public void localPlay() {
         double pos = lastPos;
+        log.info("localPlay — lastPos=" + lastPos + " mpv=" + mpv);
         mpv.play();
         if (isSynced()) server.sendPlay(clampRemote(toRemote(pos)));
     }
@@ -266,10 +267,6 @@ public class SyncEngine {
 
     public void localSkipForward(double seconds)  { localSeek(lastPos + seconds); }
     public void localSkipBackward(double seconds) { localSeek(Math.max(offsetSeconds, lastPos - seconds)); }
-    public void resetStartupWindow() {
-        connectTime = System.currentTimeMillis();
-        paused = true;
-    }
     // ── Offset ────────────────────────────────────────────────────
 
     /**

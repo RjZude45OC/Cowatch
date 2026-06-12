@@ -13,8 +13,7 @@ import javafx.scene.layout.*;
 import javafx.stage.Stage;
 
 import java.io.IOException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.logging.Logger;
 
 public class MainWindow {
 
@@ -31,6 +30,8 @@ public class MainWindow {
     private final ChatPanel        chatPanel;
     private final PlaybackControls playbackControls;
     private final OffsetPanel      offsetPanel;
+
+    private static final Logger log = Logger.getLogger(SyncEngine.class.getName());
 
     public MainWindow(Stage stage) {
         this.stage = stage;
@@ -124,7 +125,6 @@ public class MainWindow {
     public void onLaunch(String mpvUrl) {
         new Thread(() -> {
             boolean ok = mpv.launch(mpvUrl);
-            if (ok) syncEngine.resetStartupWindow();
             Platform.runLater(() -> {
                 mediaPanel.onMpvLaunched(ok);
                 if (ok) {
@@ -151,18 +151,14 @@ public class MainWindow {
 
     public MediaPanel getMediaPanel() { return mediaPanel; }
 
-    private final ExecutorService mpvExecutor =
-            Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "mpv-cmd");
-                t.setDaemon(true);
-                return t;
-            });
-
-    public void doPlay()               { mpvExecutor.submit(() -> syncEngine.localPlay()); }
-    public void doPause()              { mpvExecutor.submit(() -> syncEngine.localPause()); }
-    public void doSeek(double pos)     { mpvExecutor.submit(() -> syncEngine.localSeek(pos)); }
-    public void doSkipForward(double s){ mpvExecutor.submit(() -> syncEngine.localSkipForward(s)); }
-    public void doSkipBackward(double s){ mpvExecutor.submit(() -> syncEngine.localSkipBackward(s)); }
+    public void doPlay() {
+        log.info("doPlay — syncEngine=" + syncEngine + " mpvRunning=" + mpv.isRunning());
+        syncEngine.localPlay();
+    }
+    public void doPause()                   { syncEngine.localPause(); }
+    public void doSeek(double pos)          { syncEngine.localSeek(pos); }
+    public void doSkipForward(double secs)  { syncEngine.localSkipForward(secs); }
+    public void doSkipBackward(double secs) { syncEngine.localSkipBackward(secs); }
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -181,7 +177,6 @@ public class MainWindow {
 
     private void wireShutdown() {
         stage.setOnCloseRequest(e -> {
-            mpvExecutor.shutdownNow();
             server.disconnect();
             mpv.close();
         });
