@@ -50,7 +50,8 @@ public class MainWindow {
         root.setTop(headerBar.getNode());
         root.getStyleClass().add("app-root");
 
-        VBox leftContent = new VBox(10,
+        // ── Left column ───────────────────────────────────────────────
+        VBox leftContent = new VBox(8,
                 configPanel.getNode(),
                 offsetPanel.getNode(),
                 playbackControls.getNode());
@@ -59,24 +60,29 @@ public class MainWindow {
 
         ScrollPane leftScroll = new ScrollPane(leftContent);
         leftScroll.setFitToWidth(true);
-        leftScroll.setFitToHeight(true);
+        // Do NOT setFitToHeight(true) — that squashes content when window is short.
+        // The VBox sizes to its natural height; scroll appears only when needed.
+        leftScroll.setFitToHeight(false);
         leftScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
         leftScroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
         leftScroll.getStyleClass().add("left-scroll");
 
+        // ── Centre column ─────────────────────────────────────────────
         VBox centre = new VBox(mediaPanel.getNode());
         centre.setPadding(new Insets(10));
         centre.setFillWidth(true);
         VBox.setVgrow(mediaPanel.getNode(), Priority.ALWAYS);
 
+        // ── Right column ──────────────────────────────────────────────
         VBox right = new VBox(chatPanel.getNode());
         right.setPadding(new Insets(10));
         right.setFillWidth(true);
         VBox.setVgrow(chatPanel.getNode(), Priority.ALWAYS);
 
+        // ── SplitPane ─────────────────────────────────────────────────
         SplitPane split = new SplitPane(leftScroll, centre, right);
         split.getStyleClass().add("app-split");
-        split.setDividerPositions(0.311, 0.73);
+        split.setDividerPositions(0.27, 0.72);
         root.setCenter(split);
     }
 
@@ -101,21 +107,15 @@ public class MainWindow {
         server.joinRoom(config.roomId, config.username);
         headerBar.setConnected(config.serverHost, config.roomId);
         configPanel.onConnected();
-        mediaPanel.setMode(config.mode);       // keep — but don't reset file selection
+        mediaPanel.setMode(config.mode);
 
-        // Only disable controls if MPV isn't already running
-        if (!mpv.isRunning()) {
-            playbackControls.setEnabled(false);
-        }
+        if (!mpv.isRunning()) playbackControls.setEnabled(false);
 
         headerBar.setOnDisconnect(() -> {
             server.disconnect();
             syncEngine.close();
             headerBar.setDisconnected();
-            // Only disable controls if MPV closed too
-            if (!mpv.isRunning()) {
-                playbackControls.setEnabled(false);
-            }
+            if (!mpv.isRunning()) playbackControls.setEnabled(false);
             chatPanel.appendRaw("[system] Disconnected from server");
             configPanel.onDisconnected();
         });

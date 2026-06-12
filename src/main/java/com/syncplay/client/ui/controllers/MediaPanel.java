@@ -10,10 +10,14 @@ import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import javafx.stage.FileChooser;
 
-import java.io.File;
+import java.io.*;
+import java.nio.file.*;
 import java.util.List;
+import java.util.Properties;
 
 public class MediaPanel {
+
+    private static final Path PREFS_FILE = resolvePrefsFile();
 
     private final MainWindow  owner;
     private final VBox        node        = new VBox(12);
@@ -26,6 +30,7 @@ public class MediaPanel {
     private final PasswordField jellyfinPassField = new PasswordField();
     private final TextField     jellyfinApiField  = field("API key (optional — skips login)");
     private final Button        jellyfinConnBtn   = new Button("Connect to Jellyfin");
+    private final Button        jellyfinSaveBtn   = new Button("Save");
     private final Label         jellyfinStatus    = new Label("Not connected");
 
     private final ListView<JellyfinItem> showsList    = new ListView<>();
@@ -41,10 +46,11 @@ public class MediaPanel {
     // ── State ─────────────────────────────────────────────────────────────
     private JellyfinClient jellyfinClient;
     private SyncMode       currentMode        = SyncMode.JELLYFIN;
-    private String         savedLocalFilePath = "";   // persists across mode switches
+    private String         savedLocalFilePath = "";
 
     public MediaPanel(MainWindow owner) {
         this.owner = owner;
+        loadPrefs();
         build();
     }
 
@@ -69,13 +75,10 @@ public class MediaPanel {
     // ── Mode switching ────────────────────────────────────────────────────
 
     public void setMode(SyncMode mode) {
-        if (mode == currentMode) return;   // no rebuild if unchanged — preserves UI state
+        if (mode == currentMode) return;
         currentMode = mode;
-        if (mode == SyncMode.LOCAL) {
-            showLocalPanel();
-        } else {
-            showJellyfinPanel();
-        }
+        if (mode == SyncMode.LOCAL) showLocalPanel();
+        else showJellyfinPanel();
     }
 
     public void previewMode(SyncMode mode) { setMode(mode); }
@@ -95,16 +98,23 @@ public class MediaPanel {
         jellyfinConnBtn.getStyleClass().add("accent");
         jellyfinConnBtn.setMaxWidth(Double.MAX_VALUE);
         jellyfinConnBtn.setOnAction(e -> handleJellyfinConnect());
+        HBox.setHgrow(jellyfinConnBtn, Priority.ALWAYS);
+
+        jellyfinSaveBtn.getStyleClass().add("secondary");
+        jellyfinSaveBtn.setOnAction(e -> savePrefs());
+
+        HBox btnRow = new HBox(8, jellyfinConnBtn, jellyfinSaveBtn);
 
         VBox loginBox = new VBox(8,
                 rowLabel("Server URL", jellyfinUrlField),
                 rowLabel("Username",   jellyfinUserField),
                 rowLabel("Password",   jellyfinPassField),
                 rowLabel("API Key",    jellyfinApiField),
-                jellyfinConnBtn,
+                btnRow,
                 jellyfinStatus);
         loginBox.getStyleClass().add("jellyfin-login");
 
+        // Library browser
         showsList.setPlaceholder(new Label("Connect to Jellyfin to browse"));
         showsList.setPrefHeight(120);
         showsList.setMinHeight(80);
@@ -178,7 +188,6 @@ public class MediaPanel {
         launchLocalBtn.setMaxWidth(Double.MAX_VALUE);
         launchLocalBtn.setOnAction(e -> handleLocalLaunch());
 
-        // Restore saved state LAST — overrides any setDisable(true) above
         if (!savedLocalFilePath.isEmpty()) {
             localFileField.setText(savedLocalFilePath);
             launchLocalBtn.setDisable(false);
@@ -224,6 +233,7 @@ public class MediaPanel {
     public void onMpvLaunched(boolean success) {
         if (success) {
             launchLocalBtn.setText("MPV Running ✓");
+            launchJfBtn.setText("MPV Running ✓");
         } else {
             launchLocalBtn.setDisable(false);
             launchLocalBtn.setText("▶  Launch in MPV");
@@ -233,6 +243,8 @@ public class MediaPanel {
     public void onMpvClosed(boolean success) {
         launchLocalBtn.setText("▶  Launch in MPV");
         launchLocalBtn.setDisable(false);
+        launchJfBtn.setText("▶  Launch in MPV");
+        launchJfBtn.setDisable(false);
     }
 
     private void handleJellyfinConnect() {
@@ -304,6 +316,60 @@ public class MediaPanel {
         launchJfBtn.setDisable(true);
         launchJfBtn.setText("Launching…");
         owner.onLaunch(streamUrl);
+    }
+
+    // ── Preferences ───────────────────────────────────────────────────────
+
+    private void savePrefs() {
+        try {
+            Properties p = new Properties();
+            p.setProperty("jellyfin.url",      jellyfinUrlField.getText().trim());
+            p.setProperty("jellyfin.username",  jellyfinUserField.getText().trim());
+            p.setProperty("jellyfin.apikey",    jellyfinApiField.getText().trim());
+            // Password intentionally not saved — user re-enters each session
+
+            Files.createDirectories(PREFS_FILE.getParent());
+            try (OutputStream out = Files.newOutputStream(PREFS_FILE)) {
+                p.store(out, "SyncPlay media settings");
+            }
+            jellyfinSaveBtn.setText("Saved ✓");
+            new Thread(() -> {
+                try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
+                Platform.runLater(() -> jellyfinSaveBtn.setText("Save"));
+            }, "save-reset").start();
+
+        } catch (IOException ex) {
+            owner.showError("Could not save settings:\n" + ex.getMessage());
+        }
+    }
+
+    private void loadPrefs() {
+        if (!Files.exists(PREFS_FILE)) return;
+        try (InputStream in = Files.newInputStream(PREFS_FILE)) {
+            Properties p = new Properties();
+            p.load(in);
+            jellyfinUrlField.setText( p.getProperty("jellyfin.url",      jellyfinUrlField.getPromptText()));
+            jellyfinUserField.setText(p.getProperty("jellyfin.username",  jellyfinUserField.getPromptText()));
+            jellyfinApiField.setText( p.getProperty("jellyfin.apikey",    ""));
+        } catch (IOException ignored) {}
+    }
+
+    private static Path resolvePrefsFile() {
+        String os = System.getProperty("os.name", "").toLowerCase();
+        Path dir;
+        if (os.contains("win")) {
+            String appData = System.getenv("APPDATA");
+            dir = (appData != null ? Paths.get(appData) : Path.of(System.getProperty("user.home")))
+                    .resolve("SyncPlay");
+        } else if (os.contains("mac")) {
+            dir = Paths.get(System.getProperty("user.home"),
+                    "Library", "Application Support", "SyncPlay");
+        } else {
+            String xdg = System.getenv("XDG_CONFIG_HOME");
+            dir = (xdg != null ? Paths.get(xdg) : Paths.get(System.getProperty("user.home"), ".config"))
+                    .resolve("syncplay");
+        }
+        return dir.resolve("syncplay-media.properties");
     }
 
     // ── UI helpers ────────────────────────────────────────────────────────
