@@ -121,10 +121,7 @@ public class MPVController {
     private boolean waitForSocketAndConnect() throws InterruptedException {
         long deadline = System.currentTimeMillis() + CONNECT_TIMEOUT_MS;
         while (System.currentTimeMillis() < deadline) {
-            if (new File(SOCKET_PATH).exists()) {
-                Thread.sleep(200); // let MPV finish IPC init
-                return connectIPC();
-            }
+            if (new File(SOCKET_PATH).exists()) return connectIPC();
             Thread.sleep(CONNECT_POLL_MS);
         }
         log.severe("Timed out waiting for MPV socket");
@@ -146,9 +143,10 @@ public class MPVController {
         SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX);
         ch.connect(UnixDomainSocketAddress.of(SOCKET_PATH));
 
-        InputStream  in     = Channels.newInputStream(ch);
+        InputStream  in  = Channels.newInputStream(ch);
         OutputStream rawOut = Channels.newOutputStream(ch);
 
+        // Wrap in async writer to prevent blocking when MPV buffer full
         PipedOutputStream pipeOut = new PipedOutputStream();
         PipedInputStream  pipeIn  = new PipedInputStream(pipeOut, 65536);
 
@@ -168,13 +166,8 @@ public class MPVController {
         synchronized (writeLock) {
             writeStream = pipeOut;
         }
-
         startReaderThread(new BufferedReader(new InputStreamReader(in)));
-
-        // Wait for MPV IPC to be ready before subscribing
-        try { Thread.sleep(300); } catch (InterruptedException ignored) {}
         subscribeToEvents();
-
         log.info("Connected Unix socket: " + SOCKET_PATH);
         return true;
     }
@@ -292,7 +285,6 @@ public class MPVController {
 
     public void play()  {
         log.info("before sent play");
-        sendRaw("{\"command\":[\"seek\",0,\"relative\"]}");
         sendRaw("{\"command\":[\"set_property\",\"pause\",false]}");
         log.info("MPV: play");
     }
@@ -314,20 +306,15 @@ public class MPVController {
 
     public void sendRaw(String json) {
         String clean = json.strip();
+        log.info("MPV: play" + clean);
         if (clean.isEmpty()) return;
         synchronized (writeLock) {
-            if (writeStream == null) {
-                log.warning("sendRaw: writeStream is null, dropping: " + clean);
-                return;
-            }
+            if (writeStream == null) return;
             try {
-                byte[] bytes = (clean + "\n").getBytes();
-                log.info("sendRaw → " + clean);
-                writeStream.write(bytes);
+                writeStream.write((clean + "\n").getBytes());
                 writeStream.flush();
-                log.info("sendRaw ✓ flushed " + bytes.length + " bytes");
             } catch (Exception e) {
-                log.warning("sendRaw FAILED: " + e.getClass().getSimpleName() + ": " + e.getMessage() + " | cmd=" + clean);
+                log.warning("Failed to send MPV command: " + e.getMessage());
             }
         }
     }
