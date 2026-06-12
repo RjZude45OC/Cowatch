@@ -91,8 +91,13 @@ public class MPVController {
     public boolean launch(String fileOrUrl) {
         try {
             List<String> cmd = new ArrayList<>(Arrays.asList(
-                    MPV_BIN, "--input-ipc-server=" + SOCKET_PATH,
-                    "--pause", "--quiet", fileOrUrl));
+                    MPV_BIN,
+                    "--input-ipc-server=" + SOCKET_PATH,
+                    "--pause",
+                    "--force-window=immediate",
+                    "--keep-open=yes",
+                    "--quiet",
+                    fileOrUrl));
             log.info("Launching MPV: " + String.join(" ", cmd));
 
             mpvProcess = new ProcessBuilder(cmd).redirectErrorStream(true).start();
