@@ -142,11 +142,31 @@ public class MPVController {
     private boolean connectUnixSocket() throws IOException {
         SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX);
         ch.connect(UnixDomainSocketAddress.of(SOCKET_PATH));
+
+        InputStream  in  = Channels.newInputStream(ch);
+        OutputStream rawOut = Channels.newOutputStream(ch);
+
+        // Wrap in async writer to prevent blocking when MPV buffer full
+        PipedOutputStream pipeOut = new PipedOutputStream();
+        PipedInputStream  pipeIn  = new PipedInputStream(pipeOut, 65536);
+
+        Thread asyncWriter = new Thread(() -> {
+            byte[] buf = new byte[4096];
+            int n;
+            try {
+                while ((n = pipeIn.read(buf)) != -1) {
+                    rawOut.write(buf, 0, n);
+                    rawOut.flush();
+                }
+            } catch (IOException ignored) {}
+        }, "mpv-unix-writer");
+        asyncWriter.setDaemon(true);
+        asyncWriter.start();
+
         synchronized (writeLock) {
-            writeStream = Channels.newOutputStream(ch);
+            writeStream = pipeOut;
         }
-        startReaderThread(new BufferedReader(
-                new InputStreamReader(Channels.newInputStream(ch))));
+        startReaderThread(new BufferedReader(new InputStreamReader(in)));
         subscribeToEvents();
         log.info("Connected Unix socket: " + SOCKET_PATH);
         return true;
