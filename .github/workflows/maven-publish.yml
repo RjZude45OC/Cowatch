@@ -33,7 +33,7 @@ jobs:
         run: |
           jpackage `
             --input target `
-            --main-jar syncplay-client.jar `
+            --main-jar syncplay-client-1.0.0.jar `
             --main-class com.syncplay.client.Launcher `
             --name SyncPlay `
             --app-version 1.0 `
@@ -48,7 +48,7 @@ jobs:
         run: |
           jpackage \
             --input target \
-            --main-jar syncplay-client.jar \
+            --main-jar syncplay-client-1.0.0.jar \
             --main-class com.syncplay.client.Launcher \
             --name SyncPlay \
             --app-version 1.0 \
@@ -61,7 +61,7 @@ jobs:
         run: |
           jpackage \
             --input target \
-            --main-jar syncplay-client.jar \
+            --main-jar syncplay-client-1.0.0.jar \
             --main-class com.syncplay.client.Launcher \
             --name SyncPlay \
             --app-version 1.0 \
