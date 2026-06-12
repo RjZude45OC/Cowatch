@@ -13,6 +13,8 @@ import javafx.scene.layout.*;
 import javafx.stage.Stage;
 
 import java.io.IOException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainWindow {
 
@@ -148,11 +150,18 @@ public class MainWindow {
 
     public MediaPanel getMediaPanel() { return mediaPanel; }
 
-    public void doPlay()                    { syncEngine.localPlay(); }
-    public void doPause()                   { syncEngine.localPause(); }
-    public void doSeek(double pos)          { syncEngine.localSeek(pos); }
-    public void doSkipForward(double secs)  { syncEngine.localSkipForward(secs); }
-    public void doSkipBackward(double secs) { syncEngine.localSkipBackward(secs); }
+    private final ExecutorService mpvExecutor =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "mpv-cmd");
+                t.setDaemon(true);
+                return t;
+            });
+
+    public void doPlay()               { mpvExecutor.submit(() -> syncEngine.localPlay()); }
+    public void doPause()              { mpvExecutor.submit(() -> syncEngine.localPause()); }
+    public void doSeek(double pos)     { mpvExecutor.submit(() -> syncEngine.localSeek(pos)); }
+    public void doSkipForward(double s){ mpvExecutor.submit(() -> syncEngine.localSkipForward(s)); }
+    public void doSkipBackward(double s){ mpvExecutor.submit(() -> syncEngine.localSkipBackward(s)); }
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -171,6 +180,7 @@ public class MainWindow {
 
     private void wireShutdown() {
         stage.setOnCloseRequest(e -> {
+            mpvExecutor.shutdownNow();
             server.disconnect();
             mpv.close();
         });
