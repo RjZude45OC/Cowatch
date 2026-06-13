@@ -309,22 +309,31 @@ public class MPVController {
 //            }
 //        }
 //    }
+    private final ExecutorService writerExecutor =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "mpv-writer");
+                t.setDaemon(true);
+                return t;
+            });
+
     public void sendRaw(String json) {
         String clean = json.strip();
         if (clean.isEmpty()) return;
-        synchronized (writeLock) {
-            if (writeStream == null) { log.warning("sendRaw: null stream"); return; }
-            try {
-                long t = System.currentTimeMillis();
-                writeStream.write((clean + "\n").getBytes());
-                writeStream.flush();
-                long ms = System.currentTimeMillis() - t;
-                if (ms > 100) log.warning("sendRaw SLOW " + ms + "ms: " + clean);
-                else log.info("sendRaw ✓ " + ms + "ms → " + clean);
-            } catch (Exception e) {
-                log.warning("sendRaw FAILED: " + e.getMessage() + " | " + clean);
+        if (writeStream == null) { log.warning("sendRaw: null stream"); return; }
+        writerExecutor.submit(() -> {
+            synchronized (writeLock) {
+                try {
+                    long t = System.currentTimeMillis();
+                    writeStream.write((clean + "\n").getBytes());
+                    writeStream.flush();
+                    long ms = System.currentTimeMillis() - t;
+                    if (ms > 100) log.warning("sendRaw SLOW " + ms + "ms: " + clean);
+                    else log.info("sendRaw ✓ " + ms + "ms → " + clean);
+                } catch (Exception e) {
+                    log.warning("sendRaw FAILED: " + e.getMessage());
+                }
             }
-        }
+        });
     }
     private static String escapeJson(String s) {
         return s.replace("\\", "\\\\").replace("\"", "\\\"");
@@ -337,6 +346,7 @@ public class MPVController {
 
     public void close() {
         readerExecutor.shutdownNow();
+        writerExecutor.shutdownNow();
         synchronized (writeLock) {
             try { if (writeStream != null) writeStream.close(); } catch (Exception ignored) {}
             writeStream = null;
