@@ -155,14 +155,11 @@ public class MPVController {
         SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX);
         ch.connect(UnixDomainSocketAddress.of(SOCKET_PATH));
 
-        // Set socket timeout so writes don't block forever
-        ch.socket().setSoTimeout(2000);
-
         synchronized (writeLock) {
-            writeStream = new BufferedOutputStream(ch.socket().getOutputStream());
+            writeStream = new BufferedOutputStream(Channels.newOutputStream(ch));
         }
         startReaderThread(new BufferedReader(
-                new InputStreamReader(ch.socket().getInputStream())));
+                new InputStreamReader(Channels.newInputStream(ch))));
         subscribeToEvents();
         log.info("Connected Unix socket: " + SOCKET_PATH);
         return true;
