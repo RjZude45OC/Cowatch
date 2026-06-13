@@ -139,21 +139,34 @@ public class MPVController {
         }
     }
 
+//    private boolean connectUnixSocket() throws IOException {
+//        SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX);
+//        ch.connect(UnixDomainSocketAddress.of(SOCKET_PATH));
+//
+//        synchronized (writeLock) {
+//            writeStream = Channels.newOutputStream(ch);
+//        }
+//        startReaderThread(new BufferedReader(
+//                new InputStreamReader(Channels.newInputStream(ch))));
+//        subscribeToEvents();
+//        return true;
+//    }
     private boolean connectUnixSocket() throws IOException {
         SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX);
         ch.connect(UnixDomainSocketAddress.of(SOCKET_PATH));
 
-        InputStream  in     = Channels.newInputStream(ch);
-        OutputStream rawOut = Channels.newOutputStream(ch);
+        // Set socket timeout so writes don't block forever
+        ch.socket().setSoTimeout(2000);
 
         synchronized (writeLock) {
-            writeStream = rawOut;
+            writeStream = new BufferedOutputStream(ch.socket().getOutputStream());
         }
-        startReaderThread(new BufferedReader(new InputStreamReader(in)));
+        startReaderThread(new BufferedReader(
+                new InputStreamReader(ch.socket().getInputStream())));
         subscribeToEvents();
+        log.info("Connected Unix socket: " + SOCKET_PATH);
         return true;
     }
-
     private boolean connectWindowsPipe() {
         Kernel32 k = Kernel32.INSTANCE;
 
@@ -285,21 +298,37 @@ public class MPVController {
         sendRaw("{\"command\":[\"loadfile\",\"" + escapeJson(f) + "\"]}");
     }
 
+//    public void sendRaw(String json) {
+//        String clean = json.strip();
+//        if (clean.isEmpty()) return;
+//        synchronized (writeLock) {
+//            log.info(String.valueOf(writeStream == null));
+//            if (writeStream == null) return;
+//            try {
+//                writeStream.write((clean + "\n").getBytes());
+//                writeStream.flush();
+//            } catch (Exception e) {
+//                log.warning("Failed to send MPV command: " + e.getMessage());
+//            }
+//        }
+//    }
     public void sendRaw(String json) {
         String clean = json.strip();
         if (clean.isEmpty()) return;
         synchronized (writeLock) {
-            log.info(String.valueOf(writeStream == null));
-            if (writeStream == null) return;
+            if (writeStream == null) { log.warning("sendRaw: null stream"); return; }
             try {
+                long t = System.currentTimeMillis();
                 writeStream.write((clean + "\n").getBytes());
                 writeStream.flush();
+                long ms = System.currentTimeMillis() - t;
+                if (ms > 100) log.warning("sendRaw SLOW " + ms + "ms: " + clean);
+                else log.info("sendRaw ✓ " + ms + "ms → " + clean);
             } catch (Exception e) {
-                log.warning("Failed to send MPV command: " + e.getMessage());
+                log.warning("sendRaw FAILED: " + e.getMessage() + " | " + clean);
             }
         }
     }
-
     private static String escapeJson(String s) {
         return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }

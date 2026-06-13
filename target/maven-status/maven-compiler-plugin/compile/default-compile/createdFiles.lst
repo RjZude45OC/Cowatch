@@ -9,6 +9,7 @@ com\syncplay\client\ui\controllers\OffsetPanel.class
 com\syncplay\client\ui\SyncPlayApp.class
 com\syncplay\client\jellyfin\JellyfinItem.class
 com\syncplay\client\ui\controllers\HeaderBar.class
+com\syncplay\client\Launcher.class
 com\syncplay\client\mpv\OVL.class
 com\syncplay\client\ui\controllers\ConfigPanel.class
 com\syncplay\client\ui\controllers\MediaPanel.class
