@@ -7,8 +7,10 @@ import com.sun.jna.win32.StdCallLibrary;
 import java.io.*;
 import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
+import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -154,16 +156,19 @@ public class MPVController {
     private boolean connectUnixSocket() throws IOException {
         SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX);
         ch.connect(UnixDomainSocketAddress.of(SOCKET_PATH));
+        ch.configureBlocking(false);  // ← non-blocking
 
         synchronized (writeLock) {
-            writeStream = new BufferedOutputStream(Channels.newOutputStream(ch));
+            writeStream = null; // don't use stream API on non-blocking channel
         }
+        this.channel = ch; // store channel reference
         startReaderThread(new BufferedReader(
                 new InputStreamReader(Channels.newInputStream(ch))));
         subscribeToEvents();
         log.info("Connected Unix socket: " + SOCKET_PATH);
         return true;
     }
+
     private boolean connectWindowsPipe() {
         Kernel32 k = Kernel32.INSTANCE;
 
@@ -316,22 +321,26 @@ public class MPVController {
                 return t;
             });
 
+    private SocketChannel channel; // add field
+
     public void sendRaw(String json) {
         String clean = json.strip();
         if (clean.isEmpty()) return;
-        if (writeStream == null) { log.warning("sendRaw: null stream"); return; }
         writerExecutor.submit(() -> {
-            synchronized (writeLock) {
-                try {
-                    long t = System.currentTimeMillis();
-                    writeStream.write((clean + "\n").getBytes());
-                    writeStream.flush();
-                    long ms = System.currentTimeMillis() - t;
-                    if (ms > 100) log.warning("sendRaw SLOW " + ms + "ms: " + clean);
-                    else log.info("sendRaw ✓ " + ms + "ms → " + clean);
-                } catch (Exception e) {
-                    log.warning("sendRaw FAILED: " + e.getMessage());
+            try {
+                ByteBuffer buf = ByteBuffer.wrap((clean + "\n").getBytes(StandardCharsets.UTF_8));
+                long deadline = System.currentTimeMillis() + 2000;
+                while (buf.hasRemaining()) {
+                    if (System.currentTimeMillis() > deadline) {
+                        log.warning("sendRaw TIMEOUT, dropping: " + clean);
+                        return;
+                    }
+                    int written = channel.write(buf);
+                    if (written == 0) Thread.sleep(10); // yield, MPV not ready
                 }
+                log.info("sendRaw ✓ → " + clean);
+            } catch (Exception e) {
+                log.warning("sendRaw FAILED: " + e.getMessage());
             }
         });
     }
