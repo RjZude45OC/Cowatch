@@ -7,6 +7,7 @@ import com.sun.jna.win32.StdCallLibrary;
 import java.io.*;
 import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
+import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
@@ -152,13 +153,13 @@ public class MPVController {
 //        subscribeToEvents();
 //        return true;
 //    }
+    private SocketChannel unixChannel; // add field
+
     private boolean connectUnixSocket() throws IOException {
         SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX);
         ch.connect(UnixDomainSocketAddress.of(SOCKET_PATH));
+        this.unixChannel = ch;
 
-        synchronized (writeLock) {
-            writeStream = new BufferedOutputStream(Channels.newOutputStream(ch));
-        }
         startReaderThread(new BufferedReader(
                 new InputStreamReader(Channels.newInputStream(ch))));
         subscribeToEvents();
@@ -247,12 +248,13 @@ public class MPVController {
 
     private void startReaderThread(BufferedReader reader) {
         readerExecutor.submit(() -> {
+            log.info("Reader thread started");
             try {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     String t = line.trim();
                     if (!t.isEmpty()) {
-                        log.finest("MPV ← " + t);
+                        log.info("MPV ← " + t); // change from finest to info temporarily
                         Consumer<String> l = eventListener;
                         if (l != null) l.accept(t);
                     }
@@ -328,22 +330,25 @@ public class MPVController {
         String clean = json.strip();
         if (clean.isEmpty()) return;
         writerExecutor.submit(() -> {
-            synchronized (writeLock) {
-                if (writeStream == null) { log.warning("sendRaw: null stream"); return; }
-                try {
-                    byte[] bytes = (clean + "\n").getBytes(StandardCharsets.UTF_8);
-                    Future<?> f = writeTimeoutExecutor.submit(() -> {
+            try {
+                byte[] bytes = (clean + "\n").getBytes(StandardCharsets.UTF_8);
+                if (unixChannel != null) {
+                    // SocketChannel.write() uses write lock, separate from read lock
+                    ByteBuffer buf = ByteBuffer.wrap(bytes);
+                    while (buf.hasRemaining()) {
+                        unixChannel.write(buf);
+                    }
+                    log.info("sendRaw ✓ → " + clean);
+                } else {
+                    synchronized (writeLock) {
+                        if (writeStream == null) { log.warning("sendRaw: null stream"); return; }
                         writeStream.write(bytes);
                         writeStream.flush();
-                        return null;
-                    });
-                    f.get(2, TimeUnit.SECONDS);
-                    log.info("sendRaw ✓ → " + clean);
-                } catch (TimeoutException e) {
-                    log.warning("sendRaw TIMEOUT dropped: " + clean);
-                } catch (Exception e) {
-                    log.warning("sendRaw FAILED: " + e.getMessage());
+                        log.info("sendRaw ✓ → " + clean);
+                    }
                 }
+            } catch (Exception e) {
+                log.warning("sendRaw FAILED: " + e.getMessage());
             }
         });
     }
