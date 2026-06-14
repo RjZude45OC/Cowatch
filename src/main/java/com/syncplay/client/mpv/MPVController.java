@@ -81,11 +81,18 @@ public class MPVController {
     private static boolean isWindows() {
         return System.getProperty("os.name").toLowerCase().contains("win");
     }
-    private static String getSocketPath() {
-        return isWindows() ? "\\\\.\\pipe\\mpvsocket" : "/tmp/mpvsocket";
-    }
     private static String getMpvBinary() {
-        return isWindows() ? "mpv.exe" : "mpv";
+        if (isWindows()) return "mpv.exe";
+        String[] paths = {
+                "/usr/local/bin/mpv",
+                "/opt/homebrew/bin/mpv",
+                "/usr/bin/mpv",
+                "/usr/local/sbin/mpv"
+        };
+        for (String p : paths) {
+            if (new java.io.File(p).exists()) return p;
+        }
+        return "mpv";
     }
 
     // ── LAUNCH ───────────────────────────────────────────────────
@@ -102,7 +109,12 @@ public class MPVController {
                     fileOrUrl));
             log.info("Launching MPV: " + String.join(" ", cmd));
 
-            mpvProcess = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            if (!isWindows()) {
+                pb.environment().put("PATH", "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/usr/sbin:/bin");
+            }
+            pb.redirectErrorStream(true);
+            mpvProcess = pb.start();
 
             Thread drainer = new Thread(() -> {
                 try (BufferedReader r = new BufferedReader(
