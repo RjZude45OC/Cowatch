@@ -1,19 +1,19 @@
 name: Build Installers
-
 on:
   push:
-    tags:
-      - 'v*'          # trigger on version tags: git tag v1.0 && git push --tags
-  workflow_dispatch:  # or trigger manually from GitHub Actions tab
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
-
     runs-on: ${{ matrix.os }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,7 +27,6 @@ jobs:
       - name: Build fat JAR with Maven
         run: mvn -B package -DskipTests
 
-      # ── Windows ──────────────────────────────────────────────────
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
@@ -37,12 +36,13 @@ jobs:
             --main-class com.syncplay.client.Launcher `
             --name SyncPlay `
             --app-version 1.0 `
-            --win-console `
+            --win-dir-chooser `
+            --win-shortcut `
+            --win-menu `
             --type exe `
             --dest dist
         shell: pwsh
 
-      # ── Linux ────────────────────────────────────────────────────
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -55,7 +55,6 @@ jobs:
             --type deb \
             --dest dist
 
-      # ── macOS ────────────────────────────────────────────────────
       - name: Package (macOS)
         if: runner.os == 'macOS'
         env:
@@ -70,9 +69,12 @@ jobs:
             --type dmg \
             --dest dist
 
-      # ── Upload artifact ──────────────────────────────────────────
-      - name: Upload installer
-        uses: actions/upload-artifact@v4
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: SyncPlay-${{ runner.os }}
-          path: dist/*
+          tag_name: build-${{ github.run_number }}
+          name: "Build #${{ github.run_number }}"
+          files: dist/*
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
