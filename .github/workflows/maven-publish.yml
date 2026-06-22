@@ -37,7 +37,9 @@ jobs:
             --main-class com.syncplay.client.Launcher `
             --name SyncPlay `
             --app-version 1.0 `
-            --win-console `
+            --win-dir-chooser `
+            --win-shortcut `
+            --win-menu `
             --type exe `
             --dest dist
         shell: pwsh
