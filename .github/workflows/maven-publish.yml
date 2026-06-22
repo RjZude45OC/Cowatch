@@ -1,19 +1,16 @@
 name: Build Installers
-
 on:
   push:
-    tags:
-      - 'v*'          # trigger on version tags: git tag v1.0 && git push --tags
-  workflow_dispatch:  # or trigger manually from GitHub Actions tab
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   build:
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
-
     runs-on: ${{ matrix.os }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,7 +24,6 @@ jobs:
       - name: Build fat JAR with Maven
         run: mvn -B package -DskipTests
 
-      # ── Windows ──────────────────────────────────────────────────
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
@@ -44,7 +40,6 @@ jobs:
             --dest dist
         shell: pwsh
 
-      # ── Linux ────────────────────────────────────────────────────
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -57,7 +52,6 @@ jobs:
             --type deb \
             --dest dist
 
-      # ── macOS ────────────────────────────────────────────────────
       - name: Package (macOS)
         if: runner.os == 'macOS'
         env:
@@ -72,9 +66,27 @@ jobs:
             --type dmg \
             --dest dist
 
-      # ── Upload artifact ──────────────────────────────────────────
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: SyncPlay-${{ runner.os }}
           path: dist/*
+
+  release:
+    needs: build          # waits for all 3 matrix jobs to finish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all installers
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts   # downloads all 3 into artifacts/SyncPlay-Windows, artifacts/SyncPlay-Linux, etc.
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "Build #${{ github.run_number }}"
+          files: artifacts/**/*
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
