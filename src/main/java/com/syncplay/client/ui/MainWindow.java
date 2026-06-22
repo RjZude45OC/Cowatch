@@ -13,6 +13,7 @@ import javafx.scene.layout.*;
 import javafx.stage.Stage;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.logging.Logger;
@@ -33,7 +34,7 @@ public class MainWindow {
     private final PlaybackControls playbackControls;
     private final OffsetPanel      offsetPanel;
 
-    private static final Logger log = Logger.getLogger(SyncEngine.class.getName());
+    private static final Logger log = Logger.getLogger(MainWindow.class.getName());
 
     public MainWindow(Stage stage) {
         this.stage = stage;
@@ -57,21 +58,16 @@ public class MainWindow {
         root.setTop(headerBar.getNode());
         root.getStyleClass().add("app-root");
 
-        // ── Left column ───────────────────────────────────────────────
-        // Connection card has fixed height; offset + playback grow to fill.
         VBox.setVgrow(offsetPanel.getNode(),      Priority.ALWAYS);
         VBox.setVgrow(playbackControls.getNode(), Priority.ALWAYS);
 
         VBox leftContent = new VBox(8,
-                configPanel.getNode(),        // connection only (no sync mode)
+                configPanel.getNode(),
                 offsetPanel.getNode(),
                 playbackControls.getNode());
         leftContent.setPadding(new Insets(10));
         leftContent.setFillWidth(true);
 
-        // No ScrollPane — left column resizes with the window.
-
-        // ── Centre + Right (unchanged) ────────────────────────────────
         VBox centre = new VBox(mediaPanel.getNode());
         centre.setPadding(new Insets(10));
         centre.setFillWidth(true);
@@ -122,25 +118,69 @@ public class MainWindow {
         });
     }
 
-    // ── Launch ────────────────────────────────────────────────────────────
+    // ── Launch (single file) ────────────────────────────────────────────
 
     public void onLaunch(String mpvUrl) {
         new Thread(() -> {
-            boolean ok = mpv.launch(mpvUrl);
+            String error = mpv.launch(mpvUrl);
             Platform.runLater(() -> {
+                boolean ok = (error == null);
                 mediaPanel.onMpvLaunched(ok);
                 if (ok) {
                     playbackControls.setEnabled(true);
                     chatPanel.appendRaw("[system] MPV launched ✓");
                 } else {
-                    showError("Failed to launch MPV.\nMake sure MPV is installed and on your PATH.");
+                    showError("Failed to launch MPV", error);
                 }
             });
-            if (ok) {
+            if (error == null) {
                 try { mpv.waitForExit(); } catch (InterruptedException ignored) {}
                 Platform.runLater(this::onMpvClosed);
             }
         }, "mpv-launcher").start();
+    }
+
+    // ── Launch (playlist — first launch only, multi-entry) ──────────────
+    // Spawns MPV once with the full --playlist + --playlist-start.
+    // After this, advancing episodes should go through onNextEpisode(),
+    // NOT another call to this method — that would kill and restart MPV
+    // (window flicker, re-handshake, and on macOS a teardown race where
+    // the old process's IPC socket isn't fully released before relaunch).
+
+    public void onLaunchPlaylist(List<String> entries, int startIndex) {
+        new Thread(() -> {
+            String error = mpv.launch(entries, startIndex);
+            Platform.runLater(() -> {
+                boolean ok = (error == null);
+                mediaPanel.onMpvLaunched(ok);
+                if (ok) {
+                    playbackControls.setEnabled(true);
+                    chatPanel.appendRaw("[system] MPV launched ✓ (" + entries.size() + " episodes)");
+                } else {
+                    showError("Failed to launch MPV", error);
+                }
+            });
+            if (error == null) {
+                try { mpv.waitForExit(); } catch (InterruptedException ignored) {}
+                Platform.runLater(this::onMpvClosed);
+            }
+        }, "mpv-launcher").start();
+    }
+
+    // ── Next episode ─────────────────────────────────────────────────────
+    // IPC-only: sends "playlist-next" to the already-running MPV instance.
+    // No process kill, no relaunch, no new socket handshake.
+
+    public void onNextEpisode() {
+        if (!mpv.isRunning()) {
+            // Defensive — MediaPanel disables the Next button when MPV isn't
+            // running, so this is only reachable if MPV died unexpectedly
+            // between the button becoming enabled and being clicked.
+            showError("MPV Not Running", "The player closed unexpectedly. Please launch again to continue.");
+            mediaPanel.onMpvClosed(true);
+            return;
+        }
+        mpvExecutor.submit(mpv::nextChapter);
     }
 
     private void onMpvClosed() {
@@ -152,37 +192,66 @@ public class MainWindow {
     // ── Playback actions ──────────────────────────────────────────────────
 
     public MediaPanel getMediaPanel() { return mediaPanel; }
+
     private final ExecutorService mpvExecutor =
             Executors.newSingleThreadExecutor(r -> {
                 Thread t = new Thread(r, "mpv-cmd");
                 t.setDaemon(true);
                 return t;
             });
-    
-    public void doPlay() {
-        log.info("doPlay — syncEngine=" + syncEngine + " mpvRunning=" + mpv.isRunning());
-        mpvExecutor.submit(() -> syncEngine.localPlay());
+
+    public void doPlay()                   { mpvExecutor.submit(() -> syncEngine.localPlay()); }
+    public void doPause()                  { mpvExecutor.submit(() -> syncEngine.localPause()); }
+    public void doSeek(double pos)         { mpvExecutor.submit(() -> syncEngine.localSeek(pos)); }
+    public void doSkipForward(double s)    { mpvExecutor.submit(() -> syncEngine.localSkipForward(s)); }
+    public void doSkipBackward(double s)   { mpvExecutor.submit(() -> syncEngine.localSkipBackward(s)); }
+
+    // ── Error dialogs ─────────────────────────────────────────────────────
+
+    /**
+     * Show a detailed error dialog with a title and body message.
+     * Body is shown in a scrollable text area so long messages (e.g. install instructions)
+     * are fully readable without the dialog being cut off.
+     */
+    public void showError(String title, String body) {
+        showError(title, body, null);
     }
 
-    public void doPause()              { mpvExecutor.submit(() -> syncEngine.localPause()); }
-    public void doSeek(double pos)     { mpvExecutor.submit(() -> syncEngine.localSeek(pos)); }
-    public void doSkipForward(double s){ mpvExecutor.submit(() -> syncEngine.localSkipForward(s)); }
-    public void doSkipBackward(double s){ mpvExecutor.submit(() -> syncEngine.localSkipBackward(s)); }
-
-    // ── Helpers ───────────────────────────────────────────────────────────
-
-    public void showError(String msg, Runnable onClose) {
+    public void showError(String title, String body, Runnable onClose) {
         Platform.runLater(() -> {
-            Alert alert = new Alert(Alert.AlertType.ERROR, msg, ButtonType.OK);
-            alert.setTitle("SyncPlay Error");
+            Alert alert = new Alert(Alert.AlertType.ERROR);
+            alert.setTitle("SyncPlay — " + title);
+            alert.setHeaderText(title);
             alert.initOwner(stage);
+
+            // Use expandable text area for long messages
+            TextArea textArea = new TextArea(body);
+            textArea.setEditable(false);
+            textArea.setWrapText(true);
+            textArea.setMaxWidth(Double.MAX_VALUE);
+            textArea.setMaxHeight(Double.MAX_VALUE);
+            GridPane.setVgrow(textArea, Priority.ALWAYS);
+            GridPane.setHgrow(textArea, Priority.ALWAYS);
+
+            GridPane expContent = new GridPane();
+            expContent.setMaxWidth(Double.MAX_VALUE);
+            expContent.add(textArea, 0, 0);
+
+            alert.getDialogPane().setExpandableContent(expContent);
+            alert.getDialogPane().setExpanded(true);
+            alert.getDialogPane().setPrefWidth(520);
+
             alert.showAndWait();
             if (onClose != null) onClose.run();
         });
     }
+
+    /** Convenience overload — simple one-string error with no callback. */
     public void showError(String msg) {
-        showError(msg, null);
+        showError("Error", msg, null);
     }
+
+    // ── Shutdown ──────────────────────────────────────────────────────────
 
     private void wireShutdown() {
         stage.setOnCloseRequest(e -> {

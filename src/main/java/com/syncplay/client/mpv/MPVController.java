@@ -11,6 +11,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -21,29 +22,53 @@ public class MPVController {
 
     private static final Logger log = Logger.getLogger(MPVController.class.getName());
 
-    private static final String INSTANCE_ID  = String.valueOf(ProcessHandle.current().pid());
-    private static final String SOCKET_PATH  = isWindows()
+    private static final String INSTANCE_ID        = String.valueOf(ProcessHandle.current().pid());
+    private static final String SOCKET_BASE = isWindows()
             ? "\\\\.\\pipe\\mpvsocket_" + INSTANCE_ID
             : "/tmp/mpvsocket_" + INSTANCE_ID;
-    private static final String MPV_BIN            = getMpvBinary();
+
+    private final java.util.concurrent.atomic.AtomicInteger launchCount =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+
+    private volatile String currentSocketPath = SOCKET_BASE + "_0";
+
     private static final int    CONNECT_TIMEOUT_MS = 5_000;
     private static final int    CONNECT_POLL_MS    = 200;
 
     private Process      mpvProcess;
     private WinNT.HANDLE pipeHandle;
 
-    private OutputStream writeStream;
-    private final Object writeLock = new Object();
+    private OutputStream  writeStream;
+    private SocketChannel unixChannel;
+    private final Object  writeLock = new Object();
 
-    private final ExecutorService readerExecutor =
-            Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "mpv-reader");
-                t.setDaemon(true);
-                return t;
-            });
+    private ExecutorService readerExecutor       = newReaderExecutor();
+    private ExecutorService writerExecutor       = newWriterExecutor();
+    private ExecutorService writeTimeoutExecutor = newTimeoutExecutor();
 
     private final AtomicInteger       requestId     = new AtomicInteger(1);
     private volatile Consumer<String> eventListener;
+
+    // Temp playlist file written for multi-URL launches
+    private Path tempPlaylistFile;
+
+    // ── Executor factories ────────────────────────────────────────
+
+    private static ExecutorService newReaderExecutor() {
+        return Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "mpv-reader"); t.setDaemon(true); return t;
+        });
+    }
+    private static ExecutorService newWriterExecutor() {
+        return Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "mpv-writer"); t.setDaemon(true); return t;
+        });
+    }
+    private static ExecutorService newTimeoutExecutor() {
+        return Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "mpv-write-timeout"); t.setDaemon(true); return t;
+        });
+    }
 
     // ── JNA Kernel32 ─────────────────────────────────────────────
 
@@ -58,60 +83,107 @@ public class MPVController {
 
         WinNT.HANDLE CreateFileW(WString name, int access, int share,
                                  Pointer sec, int disposition, int flags, WinNT.HANDLE tmpl);
-
         WinNT.HANDLE CreateEventW(Pointer sec, boolean manualReset,
                                   boolean initial, WString name);
-
         boolean ReadFile(WinNT.HANDLE h, Memory buf, int toRead,
                          Pointer lpBytes, OVL ov);
-
         boolean WriteFile(WinNT.HANDLE h, byte[] buf, int toWrite,
                           Pointer lpBytes, OVL ov);
-
         boolean GetOverlappedResult(WinNT.HANDLE h, OVL ov,
                                     int[] transferred, boolean wait);
-
         boolean ResetEvent(WinNT.HANDLE h);
         boolean CloseHandle(WinNT.HANDLE h);
         int     GetLastError();
     }
 
-    // ─────────────────────────────────────────────────────────────
+    // ── Platform helpers ──────────────────────────────────────────
 
     private static boolean isWindows() {
         return System.getProperty("os.name").toLowerCase().contains("win");
     }
+    private static boolean isMac() {
+        return System.getProperty("os.name").toLowerCase().contains("mac");
+    }
+
     private static String getMpvBinary() {
         if (isWindows()) return "mpv.exe";
-        String[] paths = {
-                "/usr/local/bin/mpv",
+        String[] candidates = {
                 "/opt/homebrew/bin/mpv",
+                "/usr/local/bin/mpv",
                 "/usr/bin/mpv",
-                "/usr/local/sbin/mpv"
+                "/usr/local/sbin/mpv",
+                "/snap/bin/mpv"
         };
-        for (String p : paths) {
-            if (new java.io.File(p).exists()) return p;
+        for (String p : candidates) {
+            if (new File(p).exists()) { log.info("Found MPV at: " + p); return p; }
         }
+        log.warning("MPV not found in known paths, falling back to 'mpv'");
         return "mpv";
     }
 
     // ── LAUNCH ───────────────────────────────────────────────────
 
-    public boolean launch(String fileOrUrl) {
+    /**
+     * Launch MPV with a single file or URL.
+     * @return null on success, human-readable error on failure.
+     */
+    public String launch(String fileOrUrl) {
+        return launch(List.of(fileOrUrl), 0);
+    }
+
+    /**
+     * Launch MPV with a playlist of files/URLs, starting at the given index.
+     * Uses --playlist-start=N so MPV loads all entries but begins at startIndex.
+     *
+     * @param entries    ordered list of file paths or URLs
+     * @param startIndex 0-based index of the episode to start from
+     * @return null on success, human-readable error on failure.
+     */
+    public String launch(List<String> entries, int startIndex) {
+        if (entries == null || entries.isEmpty()) return "No media entries provided.";
+        reset();
+        currentSocketPath = (isWindows()
+                ? "\\\\.\\pipe\\mpvsocket_" + INSTANCE_ID
+                : "/tmp/mpvsocket_" + INSTANCE_ID)
+                + "_" + launchCount.incrementAndGet();
+        String bin = getMpvBinary();
+        if (!isWindows()) {
+            File binFile = new File(bin);
+            if (!binFile.isAbsolute() || !binFile.exists()) {
+                return "MPV not found.\n\n"
+                        + "Install MPV and try again:\n"
+                        + (isMac()
+                        ? "  brew install mpv\n\nIf already installed, check:\n  /opt/homebrew/bin/mpv\n  /usr/local/bin/mpv"
+                        : "  sudo apt install mpv\n  # or: sudo pacman -S mpv");
+            }
+        }
+
         try {
-            List<String> cmd = new ArrayList<>(Arrays.asList(
-                    MPV_BIN,
-                    "--input-ipc-server=" + SOCKET_PATH,
-                    "--pause",
-                    "--force-window=immediate",
-                    "--keep-open=yes",
-                    "--quiet",
-                    fileOrUrl));
+            List<String> cmd = new ArrayList<>();
+            cmd.add(bin);
+            cmd.add("--input-ipc-server=" + currentSocketPath);
+            cmd.add("--pause");
+            cmd.add("--force-window=immediate");
+            cmd.add("--keep-open=yes");
+            cmd.add("--quiet");
+
+            if (entries.size() == 1) {
+                // Single entry — pass directly, no playlist file needed
+                cmd.add(entries.get(0));
+            } else {
+                // Multiple entries — write an M3U playlist file and use --playlist
+                tempPlaylistFile = writeTempPlaylist(entries);
+                cmd.add("--playlist=" + tempPlaylistFile.toAbsolutePath());
+                cmd.add("--playlist-start=" + Math.max(0, Math.min(startIndex, entries.size() - 1)));
+            }
+
             log.info("Launching MPV: " + String.join(" ", cmd));
 
             ProcessBuilder pb = new ProcessBuilder(cmd);
             if (!isWindows()) {
-                pb.environment().put("PATH", "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/usr/sbin:/bin");
+                pb.environment().merge("PATH",
+                        "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/snap/bin",
+                        (existing, extra) -> extra + ":" + existing);
             }
             pb.redirectErrorStream(true);
             mpvProcess = pb.start();
@@ -125,20 +197,46 @@ public class MPVController {
             drainer.setDaemon(true);
             drainer.start();
 
-            return waitForSocketAndConnect();
+            boolean connected = waitForSocketAndConnect();
+            if (!connected) return "MPV launched but IPC socket connection timed out.\n"
+                    + "The file may be invalid or MPV crashed on startup.";
+            return null;
+
+        } catch (IOException e) {
+            log.severe("Failed to start MPV process: " + e.getMessage());
+            return "Failed to start MPV: " + e.getMessage();
         } catch (Exception e) {
-            log.severe("Failed to launch MPV: " + e.getMessage());
-            return false;
+            log.severe("Unexpected error launching MPV: " + e.getMessage());
+            return "Unexpected error: " + e.getMessage();
         }
+    }
+
+    /**
+     * Write a plain-text M3U playlist file to the system temp directory.
+     * Each line is one file path or URL. MPV reads this with --playlist=.
+     */
+    private Path writeTempPlaylist(List<String> entries) throws IOException {
+        Path f = Files.createTempFile("syncplay-playlist-", ".m3u");
+        f.toFile().deleteOnExit();
+        try (BufferedWriter w = Files.newBufferedWriter(f, StandardCharsets.UTF_8)) {
+            w.write("#EXTM3U");
+            w.newLine();
+            for (String entry : entries) {
+                w.write(entry);
+                w.newLine();
+            }
+        }
+        log.info("Wrote playlist (" + entries.size() + " entries): " + f);
+        return f;
     }
 
     private boolean waitForSocketAndConnect() throws InterruptedException {
         long deadline = System.currentTimeMillis() + CONNECT_TIMEOUT_MS;
         while (System.currentTimeMillis() < deadline) {
-            if (new File(SOCKET_PATH).exists()) return connectIPC();
+            if (new File(currentSocketPath).exists()) return connectIPC();
             Thread.sleep(CONNECT_POLL_MS);
         }
-        log.severe("Timed out waiting for MPV socket");
+        log.severe("Timed out waiting for MPV socket at " + currentSocketPath);
         return false;
     }
 
@@ -153,74 +251,48 @@ public class MPVController {
         }
     }
 
-//    private boolean connectUnixSocket() throws IOException {
-//        SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX);
-//        ch.connect(UnixDomainSocketAddress.of(SOCKET_PATH));
-//
-//        synchronized (writeLock) {
-//            writeStream = Channels.newOutputStream(ch);
-//        }
-//        startReaderThread(new BufferedReader(
-//                new InputStreamReader(Channels.newInputStream(ch))));
-//        subscribeToEvents();
-//        return true;
-//    }
-    private SocketChannel unixChannel; // add field
-
     private boolean connectUnixSocket() throws IOException {
         SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX);
-        ch.connect(UnixDomainSocketAddress.of(SOCKET_PATH));
+        ch.connect(UnixDomainSocketAddress.of(currentSocketPath));
         this.unixChannel = ch;
-
         startReaderThread(new BufferedReader(
                 new InputStreamReader(Channels.newInputStream(ch))));
         subscribeToEvents();
-        log.info("Connected Unix socket: " + SOCKET_PATH);
+        log.info("Connected Unix socket: " + currentSocketPath);
         return true;
     }
+
     private boolean connectWindowsPipe() {
         Kernel32 k = Kernel32.INSTANCE;
-
         WinNT.HANDLE h = k.CreateFileW(
-                new WString(SOCKET_PATH),
+                new WString(currentSocketPath),
                 Kernel32.GENERIC_READ | Kernel32.GENERIC_WRITE,
-                0, null,
-                Kernel32.OPEN_EXISTING,
-                Kernel32.FILE_FLAG_OVERLAPPED,
-                null);
+                0, null, Kernel32.OPEN_EXISTING, Kernel32.FILE_FLAG_OVERLAPPED, null);
 
         int err = k.GetLastError();
-        if (h == null || err != 0) {
-            log.severe("CreateFile failed, error=" + err);
-            return false;
-        }
+        if (h == null || err != 0) { log.severe("CreateFile failed, error=" + err); return false; }
         pipeHandle = h;
 
-        // Write stream — own OVERLAPPED + event
         WinNT.HANDLE writeEvent = k.CreateEventW(null, true, false, null);
         OVL writeOVL = new OVL();
         writeOVL.hEvent = writeEvent;
         writeOVL.write();
 
         OutputStream out = new OutputStream() {
-            @Override public void write(int b) throws IOException {
-                write(new byte[]{(byte) b}, 0, 1);
-            }
+            @Override public void write(int b) throws IOException { write(new byte[]{(byte) b}, 0, 1); }
             @Override public void write(byte[] buf, int off, int len) throws IOException {
                 byte[] chunk = (off == 0 && len == buf.length)
                         ? buf : Arrays.copyOfRange(buf, off, off + len);
                 k.ResetEvent(writeEvent);
                 boolean ok = k.WriteFile(pipeHandle, chunk, chunk.length, null, writeOVL);
                 int we = k.GetLastError();
-                if (!ok && we != Kernel32.ERROR_IO_PENDING)
-                    throw new IOException("WriteFile error=" + we);
+                if (!ok && we != Kernel32.ERROR_IO_PENDING) throw new IOException("WriteFile error=" + we);
                 int[] xfer = {0};
                 if (!k.GetOverlappedResult(pipeHandle, writeOVL, xfer, true))
                     throw new IOException("GetOverlappedResult(write) error=" + k.GetLastError());
             }
         };
 
-        // Read stream — own OVERLAPPED + event
         WinNT.HANDLE readEvent = k.CreateEventW(null, true, false, null);
         OVL readOVL = new OVL();
         readOVL.hEvent = readEvent;
@@ -229,9 +301,7 @@ public class MPVController {
         InputStream in = new InputStream() {
             final Memory tmp = new Memory(4096);
             @Override public int read() throws IOException {
-                byte[] b = new byte[1];
-                int n = read(b, 0, 1);
-                return n == -1 ? -1 : (b[0] & 0xFF);
+                byte[] b = new byte[1]; int n = read(b, 0, 1); return n == -1 ? -1 : (b[0] & 0xFF);
             }
             @Override public int read(byte[] dst, int off, int len) throws IOException {
                 int toRead = Math.min(len, (int) tmp.size());
@@ -247,12 +317,10 @@ public class MPVController {
             }
         };
 
-        synchronized (writeLock) {
-            writeStream = new BufferedOutputStream(out);
-        }
+        synchronized (writeLock) { writeStream = new BufferedOutputStream(out); }
         startReaderThread(new BufferedReader(new InputStreamReader(in)));
         subscribeToEvents();
-        log.info("Connected Windows pipe (overlapped): " + SOCKET_PATH);
+        log.info("Connected Windows pipe (overlapped): " + currentSocketPath);
         return true;
     }
 
@@ -266,7 +334,7 @@ public class MPVController {
                 while ((line = reader.readLine()) != null) {
                     String t = line.trim();
                     if (!t.isEmpty()) {
-                        log.info("MPV ← " + t); // change from finest to info temporarily
+                        log.finest("MPV ← " + t);
                         Consumer<String> l = eventListener;
                         if (l != null) l.accept(t);
                     }
@@ -277,66 +345,52 @@ public class MPVController {
             }
         });
     }
+
     public void waitForExit() throws InterruptedException {
         if (mpvProcess != null) mpvProcess.waitFor();
     }
+
     // ── SUBSCRIPTIONS ────────────────────────────────────────────
 
     private void subscribeToEvents() {
         sendRaw("{\"command\":[\"observe_property\",1,\"time-pos\"]}");
         sendRaw("{\"command\":[\"observe_property\",2,\"pause\"]}");
         sendRaw("{\"command\":[\"observe_property\",3,\"duration\"]}");
+        // Track playlist position so UI can show "next episode" state
+        sendRaw("{\"command\":[\"observe_property\",4,\"playlist-pos\"]}");
+        sendRaw("{\"command\":[\"observe_property\",5,\"playlist-count\"]}");
     }
 
     // ── PLAYBACK CONTROLS ────────────────────────────────────────
 
-    public void play()  {
-        sendRaw("{\"command\":[\"set_property\",\"pause\",false]}");
-        log.info("MPV: play");
-    }
-    public void pause() {
-        sendRaw("{\"command\":[\"set_property\",\"pause\",true]}");
-        log.info("MPV: pause");
-    }
+    public void play()  { sendRaw("{\"command\":[\"set_property\",\"pause\",false]}"); log.info("MPV: play"); }
+    public void pause() { sendRaw("{\"command\":[\"set_property\",\"pause\",true]}");  log.info("MPV: pause"); }
+
     public void seekTo(double s) {
         sendRaw("{\"command\":[\"seek\"," + s + ",\"absolute\"]}");
         log.info("MPV: seek → " + s);
     }
+
+    public void nextChapter() {
+        sendRaw("{\"command\":[\"playlist-next\",\"weak\"]}");
+        log.info("MPV: playlist-next");
+    }
+
+    public void prevChapter() {
+        sendRaw("{\"command\":[\"playlist-prev\",\"weak\"]}");
+        log.info("MPV: playlist-prev");
+    }
+
     public void requestPosition() {
         int id = requestId.getAndIncrement();
         sendRaw("{\"command\":[\"get_property\",\"time-pos\"],\"request_id\":" + id + "}");
     }
+
     public void loadFile(String f) {
         sendRaw("{\"command\":[\"loadfile\",\"" + escapeJson(f) + "\"]}");
     }
 
-//    public void sendRaw(String json) {
-//        String clean = json.strip();
-//        if (clean.isEmpty()) return;
-//        synchronized (writeLock) {
-//            log.info(String.valueOf(writeStream == null));
-//            if (writeStream == null) return;
-//            try {
-//                writeStream.write((clean + "\n").getBytes());
-//                writeStream.flush();
-//            } catch (Exception e) {
-//                log.warning("Failed to send MPV command: " + e.getMessage());
-//            }
-//        }
-//    }
-    private final ExecutorService writeTimeoutExecutor =
-            Executors.newCachedThreadPool(r -> {
-                Thread t = new Thread(r, "mpv-write-timeout");
-                t.setDaemon(true);
-                return t;
-            });
-
-    private final ExecutorService writerExecutor =
-            Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "mpv-writer");
-                t.setDaemon(true);
-                return t;
-            });
+    // ── SEND ─────────────────────────────────────────────────────
 
     public void sendRaw(String json) {
         String clean = json.strip();
@@ -345,46 +399,72 @@ public class MPVController {
             try {
                 byte[] bytes = (clean + "\n").getBytes(StandardCharsets.UTF_8);
                 if (unixChannel != null) {
-                    // SocketChannel.write() uses write lock, separate from read lock
                     ByteBuffer buf = ByteBuffer.wrap(bytes);
-                    while (buf.hasRemaining()) {
-                        unixChannel.write(buf);
-                    }
-                    log.info("sendRaw ✓ → " + clean);
+                    while (buf.hasRemaining()) unixChannel.write(buf);
+                    log.finest("sendRaw ✓ → " + clean);
                 } else {
                     synchronized (writeLock) {
-                        if (writeStream == null) { log.warning("sendRaw: null stream"); return; }
+                        if (writeStream == null) { log.warning("sendRaw: null stream, dropping: " + clean); return; }
                         writeStream.write(bytes);
                         writeStream.flush();
-                        log.info("sendRaw ✓ → " + clean);
+                        log.finest("sendRaw ✓ → " + clean);
                     }
                 }
             } catch (Exception e) {
-                log.warning("sendRaw FAILED: " + e.getMessage());
+                log.warning("sendRaw FAILED: " + e.getMessage() + " | " + clean);
             }
         });
     }
+
     private static String escapeJson(String s) {
         return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
+    // ── STATE ─────────────────────────────────────────────────────
+
     public void setEventListener(Consumer<String> l) { this.eventListener = l; }
     public boolean isRunning() { return mpvProcess != null && mpvProcess.isAlive(); }
 
-    // ── SHUTDOWN ─────────────────────────────────────────────────
+    // ── RESET + SHUTDOWN ─────────────────────────────────────────
 
-    public void close() {
+    private void reset() {
         readerExecutor.shutdownNow();
         writerExecutor.shutdownNow();
         writeTimeoutExecutor.shutdownNow();
+
+        try { if (unixChannel != null) unixChannel.close(); } catch (Exception ignored) {}
+        unixChannel = null;
+
         synchronized (writeLock) {
             try { if (writeStream != null) writeStream.close(); } catch (Exception ignored) {}
             writeStream = null;
         }
+
         if (pipeHandle != null) {
-            Kernel32.INSTANCE.CloseHandle(pipeHandle);
+            try { Kernel32.INSTANCE.CloseHandle(pipeHandle); } catch (Exception ignored) {}
             pipeHandle = null;
         }
-        if (mpvProcess != null) mpvProcess.destroy();
+
+        if (mpvProcess != null) { mpvProcess.destroy(); mpvProcess = null; }
+
+        // Delete temp playlist if any
+        if (tempPlaylistFile != null) {
+            try { Files.deleteIfExists(tempPlaylistFile); } catch (Exception ignored) {}
+            tempPlaylistFile = null;
+        }
+
+        if (!isWindows()) {
+            try { Files.deleteIfExists(Path.of(currentSocketPath)); } catch (Exception ignored) {}
+        }
+        if (mpvProcess != null) {
+            mpvProcess.destroy();
+            try { mpvProcess.waitFor(2, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+            mpvProcess = null;
+        }
+        readerExecutor       = newReaderExecutor();
+        writerExecutor       = newWriterExecutor();
+        writeTimeoutExecutor = newTimeoutExecutor();
     }
+
+    public void close() { reset(); }
 }

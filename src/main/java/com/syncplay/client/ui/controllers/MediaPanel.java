@@ -12,17 +12,23 @@ import javafx.stage.FileChooser;
 
 import java.io.*;
 import java.nio.file.*;
-import java.util.List;
+import java.util.*;
+import java.util.stream.*;
 import java.util.Properties;
 
 public class MediaPanel {
 
     private static final Path PREFS_FILE = resolvePrefsFile();
 
-    private final MainWindow  owner;
-    private final VBox        node        = new VBox(12);
-    private final VBox        card        = new VBox(10);
-    private final StackPane   contentArea = new StackPane();
+    // Video extensions recognised for folder scanning
+    private static final Set<String> VIDEO_EXTS = Set.of(
+            "mp4","mkv","avi","mov","flv","wmv","m4v","ts","webm","ogv"
+    );
+
+    private final MainWindow owner;
+    private final VBox       node        = new VBox(12);
+    private final VBox       card        = new VBox(10);
+    private final StackPane  contentArea = new StackPane();
 
     // ── Jellyfin widgets ──────────────────────────────────────────────────
     private final TextField     jellyfinUrlField  = field("https://jellyfin.example.com");
@@ -37,16 +43,23 @@ public class MediaPanel {
     private final ListView<JellyfinItem> seasonsList  = new ListView<>();
     private final ListView<JellyfinItem> episodesList = new ListView<>();
     private final Button                 launchJfBtn  = new Button("▶  Launch in MPV");
+    private final Button                 nextJfBtn    = new Button("▶▶  Next Episode");
 
     // ── Local file widgets ────────────────────────────────────────────────
-    private final TextField localFileField = field("No file selected");
-    private final Button    browseBtn      = new Button("Browse…");
-    private final Button    launchLocalBtn = new Button("▶  Launch in MPV");
+    private final TextField localFileField  = field("No file selected");
+    private final Button    browseBtn       = new Button("Browse…");
+    private final Button    launchLocalBtn  = new Button("▶  Launch in MPV");
+    private final Button    nextLocalBtn    = new Button("▶▶  Next Episode");
+    private final Label     playlistLabel   = new Label();
 
     // ── State ─────────────────────────────────────────────────────────────
     private JellyfinClient jellyfinClient;
     private SyncMode       currentMode        = SyncMode.JELLYFIN;
     private String         savedLocalFilePath = "";
+
+    // Playlist state — shared logic for local and Jellyfin
+    private List<String> playlistEntries = new ArrayList<>();
+    private int          currentIndex    = 0;
 
     public MediaPanel(MainWindow owner) {
         this.owner = owner;
@@ -86,6 +99,104 @@ public class MediaPanel {
     private void showJellyfinPanel() { contentArea.getChildren().setAll(buildJellyfinPanel()); }
     private void showLocalPanel()    { contentArea.getChildren().setAll(buildLocalPanel()); }
 
+    // ── Playlist core logic ───────────────────────────────────────────────
+
+    /**
+     * Build a playlist from a local file — scan sibling video files in
+     * the same folder, sort alphabetically, find the selected file's index.
+     */
+    private List<String> buildLocalPlaylist(File selectedFile) {
+        File dir = selectedFile.getParentFile();
+        if (dir == null || !dir.isDirectory()) return List.of(selectedFile.getAbsolutePath());
+
+        File[] siblings = dir.listFiles(f ->
+                f.isFile() && isVideoFile(f.getName()));
+        if (siblings == null || siblings.length == 0) return List.of(selectedFile.getAbsolutePath());
+
+        return Arrays.stream(siblings)
+                .sorted(Comparator.comparing(f -> f.getName().toLowerCase()))
+                .map(File::getAbsolutePath)
+                .collect(Collectors.toList());
+    }
+
+    private int findIndex(List<String> entries, String target) {
+        for (int i = 0; i < entries.size(); i++) {
+            if (entries.get(i).equals(target)) return i;
+        }
+        return 0;
+    }
+
+    private boolean isVideoFile(String name) {
+        int dot = name.lastIndexOf('.');
+        if (dot < 0) return false;
+        return VIDEO_EXTS.contains(name.substring(dot + 1).toLowerCase());
+    }
+
+    /**
+     * Launch with a playlist. Shared by local and Jellyfin paths.
+     * Stores playlist state so "Next Episode" can advance it.
+     * This is the FIRST launch only — spawns one MPV process with the
+     * whole playlist loaded (--playlist + --playlist-start).
+     */
+    private void launchPlaylist(List<String> entries, int startIndex, boolean isJellyfin) {
+        if (entries.isEmpty()) return;
+        playlistEntries = new ArrayList<>(entries);
+        currentIndex    = Math.max(0, Math.min(startIndex, entries.size() - 1));
+
+        updatePlaylistLabels(isJellyfin);
+
+        if (isJellyfin) {
+            launchJfBtn.setDisable(true);
+            launchJfBtn.setText("Launching…");
+        } else {
+            launchLocalBtn.setDisable(true);
+            launchLocalBtn.setText("Launching…");
+        }
+
+        // Use list + start index for multi-entry playlists, single entry otherwise
+        if (entries.size() == 1) {
+            owner.onLaunch(entries.get(0));
+        } else {
+            owner.onLaunchPlaylist(entries, startIndex);
+        }
+    }
+
+    private void updatePlaylistLabels(boolean isJellyfin) {
+        int total = playlistEntries.size();
+        String info = total > 1
+                ? "Episode " + (currentIndex + 1) + " of " + total
+                : "";
+        playlistLabel.setText(info);
+
+        boolean hasNext = currentIndex < total - 1;
+        nextLocalBtn.setDisable(!hasNext);
+        nextJfBtn.setDisable(!hasNext);
+    }
+
+    /**
+     * Advance to the next entry in the already-loaded playlist.
+     * Does NOT relaunch MPV — sends "playlist-next" over IPC to the
+     * running instance, which already has the full playlist loaded
+     * from the initial launch. This avoids killing/restarting the
+     * player (window flicker, re-handshake, and the macOS teardown
+     * race where the old IPC socket isn't released before relaunch).
+     */
+    private void handleNextEpisode(boolean isJellyfin) {
+        if (currentIndex >= playlistEntries.size() - 1) return;
+        currentIndex++;
+        updatePlaylistLabels(isJellyfin);
+
+        if (isJellyfin) {
+            launchJfBtn.setDisable(true);
+            launchJfBtn.setText("Launching…");
+        } else {
+            launchLocalBtn.setDisable(true);
+            launchLocalBtn.setText("Launching…");
+        }
+
+        owner.onNextEpisode();
+    }
+
     // ── Jellyfin panel ────────────────────────────────────────────────────
 
     private VBox buildJellyfinPanel() {
@@ -114,7 +225,6 @@ public class MediaPanel {
                 jellyfinStatus);
         loginBox.getStyleClass().add("jellyfin-login");
 
-        // Library browser
         showsList.setPlaceholder(new Label("Connect to Jellyfin to browse"));
         showsList.setPrefHeight(120);
         showsList.setMinHeight(80);
@@ -142,6 +252,11 @@ public class MediaPanel {
         launchJfBtn.setMaxWidth(Double.MAX_VALUE);
         launchJfBtn.setDisable(true);
         launchJfBtn.setOnAction(e -> handleJellyfinLaunch());
+
+        nextJfBtn.setMaxWidth(Double.MAX_VALUE);
+        nextJfBtn.setDisable(true);
+        nextJfBtn.setOnAction(e -> handleNextEpisode(true));
+
         episodesList.getSelectionModel().selectedItemProperty()
                 .addListener((obs, old, now) -> launchJfBtn.setDisable(now == null));
 
@@ -149,7 +264,8 @@ public class MediaPanel {
                 sectionLabel("Shows / Movies"), showsList,
                 sectionLabel("Seasons"),        seasonsList,
                 sectionLabel("Episodes"),       episodesList,
-                launchJfBtn);
+                launchJfBtn,
+                nextJfBtn);
         browserBox.setFillWidth(true);
         VBox.setVgrow(showsList,    Priority.ALWAYS);
         VBox.setVgrow(episodesList, Priority.ALWAYS);
@@ -168,7 +284,7 @@ public class MediaPanel {
             fc.setTitle("Select Media File");
             fc.getExtensionFilters().addAll(
                     new FileChooser.ExtensionFilter("Video Files",
-                            "*.mp4","*.mkv","*.avi","*.mov","*.flv","*.wmv","*.m4v","*.ts"),
+                            "*.mp4","*.mkv","*.avi","*.mov","*.flv","*.wmv","*.m4v","*.ts","*.webm"),
                     new FileChooser.ExtensionFilter("All Files", "*.*"));
             File file = fc.showOpenDialog(
                     node.getScene() != null ? node.getScene().getWindow() : null);
@@ -176,6 +292,14 @@ public class MediaPanel {
                 savedLocalFilePath = file.getAbsolutePath();
                 localFileField.setText(savedLocalFilePath);
                 launchLocalBtn.setDisable(false);
+
+                // Pre-scan folder to show playlist info
+                List<String> playlist = buildLocalPlaylist(file);
+                int idx = findIndex(playlist, file.getAbsolutePath());
+                int total = playlist.size();
+                playlistLabel.setText(total > 1
+                        ? "Found " + total + " episodes in folder — starting at #" + (idx + 1)
+                        : "Single file selected");
             }
         });
 
@@ -187,6 +311,13 @@ public class MediaPanel {
             launchLocalBtn.getStyleClass().add("green");
         launchLocalBtn.setMaxWidth(Double.MAX_VALUE);
         launchLocalBtn.setOnAction(e -> handleLocalLaunch());
+
+        nextLocalBtn.setMaxWidth(Double.MAX_VALUE);
+        nextLocalBtn.setDisable(true);
+        nextLocalBtn.setOnAction(e -> handleNextEpisode(false));
+
+        playlistLabel.getStyleClass().add("subhead");
+        playlistLabel.setWrapText(true);
 
         if (!savedLocalFilePath.isEmpty()) {
             localFileField.setText(savedLocalFilePath);
@@ -201,13 +332,17 @@ public class MediaPanel {
 
         Label hint = new Label(
                 "Each user loads their own copy of the file.\n" +
-                        "Make sure everyone has the same episode before launching.");
+                        "All video files in the same folder are added as a playlist automatically.");
         hint.setWrapText(true);
         hint.getStyleClass().add("subhead");
 
         VBox panel = new VBox(12,
                 sectionLabel("Select local media file"),
-                fileRow, hint, launchLocalBtn);
+                fileRow,
+                playlistLabel,
+                hint,
+                launchLocalBtn,
+                nextLocalBtn);
         panel.setFillWidth(true);
         panel.setAlignment(Pos.TOP_LEFT);
         return panel;
@@ -218,25 +353,33 @@ public class MediaPanel {
     private void handleLocalLaunch() {
         String path = localFileField.getText().trim();
         if (path.isEmpty() || path.equals("No file selected")) {
-            owner.showError("Please select a file first.");
+            owner.showError("No File Selected", "Please select a file first.");
             return;
         }
-        if (!new File(path).exists()) {
-            owner.showError("File not found:\n" + path);
+        File file = new File(path);
+        if (!file.exists()) {
+            owner.showError("File Not Found", "File not found:\n" + path);
             return;
         }
-        launchLocalBtn.setDisable(true);
-        launchLocalBtn.setText("Launching…");
-        owner.onLaunch(path);
+
+        List<String> playlist = buildLocalPlaylist(file);
+        int startIndex        = findIndex(playlist, file.getAbsolutePath());
+        launchPlaylist(playlist, startIndex, false);
     }
 
     public void onMpvLaunched(boolean success) {
         if (success) {
             launchLocalBtn.setText("MPV Running ✓");
             launchJfBtn.setText("MPV Running ✓");
+            // Enable next button if playlist has more entries
+            boolean hasNext = currentIndex < playlistEntries.size() - 1;
+            nextLocalBtn.setDisable(!hasNext);
+            nextJfBtn.setDisable(!hasNext);
         } else {
             launchLocalBtn.setDisable(false);
             launchLocalBtn.setText("▶  Launch in MPV");
+            launchJfBtn.setDisable(episodesList.getSelectionModel().getSelectedItem() == null);
+            launchJfBtn.setText("▶  Launch in MPV");
         }
     }
 
@@ -244,7 +387,9 @@ public class MediaPanel {
         launchLocalBtn.setText("▶  Launch in MPV");
         launchLocalBtn.setDisable(false);
         launchJfBtn.setText("▶  Launch in MPV");
-        launchJfBtn.setDisable(false);
+        launchJfBtn.setDisable(episodesList.getSelectionModel().getSelectedItem() == null);
+        nextLocalBtn.setDisable(true);
+        nextJfBtn.setDisable(true);
     }
 
     private void handleJellyfinConnect() {
@@ -310,12 +455,17 @@ public class MediaPanel {
     }
 
     private void handleJellyfinLaunch() {
-        JellyfinItem item = episodesList.getSelectionModel().getSelectedItem();
-        if (item == null || jellyfinClient == null) return;
-        String streamUrl = jellyfinClient.getStreamUrl(item.id());
-        launchJfBtn.setDisable(true);
-        launchJfBtn.setText("Launching…");
-        owner.onLaunch(streamUrl);
+        JellyfinItem selected = episodesList.getSelectionModel().getSelectedItem();
+        if (selected == null || jellyfinClient == null) return;
+
+        // Build playlist from all episodes in the list
+        List<JellyfinItem> allEpisodes = new ArrayList<>(episodesList.getItems());
+        List<String> urls = allEpisodes.stream()
+                .map(ep -> jellyfinClient.getStreamUrl(ep.id()))
+                .collect(Collectors.toList());
+        int startIndex = allEpisodes.indexOf(selected);
+
+        launchPlaylist(urls, startIndex, true);
     }
 
     // ── Preferences ───────────────────────────────────────────────────────
@@ -326,7 +476,6 @@ public class MediaPanel {
             p.setProperty("jellyfin.url",      jellyfinUrlField.getText().trim());
             p.setProperty("jellyfin.username",  jellyfinUserField.getText().trim());
             p.setProperty("jellyfin.apikey",    jellyfinApiField.getText().trim());
-            // Password intentionally not saved — user re-enters each session
 
             Files.createDirectories(PREFS_FILE.getParent());
             try (OutputStream out = Files.newOutputStream(PREFS_FILE)) {
@@ -339,7 +488,7 @@ public class MediaPanel {
             }, "save-reset").start();
 
         } catch (IOException ex) {
-            owner.showError("Could not save settings:\n" + ex.getMessage());
+            owner.showError("Save Failed", "Could not save settings:\n" + ex.getMessage());
         }
     }
 
@@ -348,9 +497,9 @@ public class MediaPanel {
         try (InputStream in = Files.newInputStream(PREFS_FILE)) {
             Properties p = new Properties();
             p.load(in);
-            jellyfinUrlField.setText( p.getProperty("jellyfin.url",      jellyfinUrlField.getPromptText()));
-            jellyfinUserField.setText(p.getProperty("jellyfin.username",  jellyfinUserField.getPromptText()));
-            jellyfinApiField.setText( p.getProperty("jellyfin.apikey",    ""));
+            jellyfinUrlField.setText( p.getProperty("jellyfin.url",     jellyfinUrlField.getPromptText()));
+            jellyfinUserField.setText(p.getProperty("jellyfin.username", jellyfinUserField.getPromptText()));
+            jellyfinApiField.setText( p.getProperty("jellyfin.apikey",   ""));
         } catch (IOException ignored) {}
     }
 

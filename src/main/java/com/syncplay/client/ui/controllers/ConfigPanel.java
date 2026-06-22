@@ -105,9 +105,6 @@ public class ConfigPanel {
     private void handleConnect() {
         try {
             int port = Integer.parseInt(portField.getText().trim());
-            // Room is derived from username for simplicity — server handles
-            // grouping. If your server protocol requires a room ID, expose
-            // the field again here.
             SessionConfig config = SessionConfig.builder()
                     .serverHost(hostField.getText().trim())
                     .serverPort(port)
@@ -120,9 +117,9 @@ public class ConfigPanel {
             connectBtn.setText("Connecting…");
             owner.onConnect(config);
         } catch (NumberFormatException ex) {
-            owner.showError("Port must be a number.");
+            owner.showError("Invalid Input", "Port must be a number.");
         } catch (IOException e) {
-            owner.showError(e.getMessage(), () -> {
+            owner.showError("Connection Failed", e.getMessage(), () -> {
                 connectBtn.setDisable(false);
                 connectBtn.setText("Connect");
             });
@@ -154,7 +151,7 @@ public class ConfigPanel {
             }, "save-reset").start();
 
         } catch (IOException ex) {
-            owner.showError("Could not save settings:\n" + ex.getMessage());
+            owner.showError("Save Failed", "Could not save settings:\n" + ex.getMessage());
         }
     }
 
