@@ -66,6 +66,12 @@ jobs:
             --type dmg \
             --dest dist
 
+      - name: Delete old artifacts
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: SyncPlay-${{ runner.os }}
+          failOnError: false
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
@@ -73,13 +79,19 @@ jobs:
           path: dist/*
 
   release:
-    needs: build          # waits for all 3 matrix jobs to finish
+    needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Delete old artifacts
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: SyncPlay-*
+          failOnError: false
+
       - name: Download all installers
         uses: actions/download-artifact@v4
         with:
-          path: artifacts   # downloads all 3 into artifacts/SyncPlay-Windows, artifacts/SyncPlay-Linux, etc.
+          path: artifacts
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
