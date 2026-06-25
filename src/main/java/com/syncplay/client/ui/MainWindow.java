@@ -1,11 +1,9 @@
 package com.syncplay.client.ui;
 
-import com.syncplay.client.jellyfin.JellyfinItem;
 import com.syncplay.client.model.*;
 import com.syncplay.client.mpv.MPVController;
 import com.syncplay.client.network.ServerConnection;
 import com.syncplay.client.sync.SyncEngine;
-import com.syncplay.client.tracking.TrackingManager;
 import com.syncplay.client.ui.controllers.*;
 
 import javafx.application.Platform;
@@ -25,9 +23,8 @@ public class MainWindow {
     private final Stage      stage;
     private final BorderPane root = new BorderPane();
 
-    private final MPVController    mpv            = new MPVController();
-    private final ServerConnection server         = new ServerConnection();
-    private final TrackingManager  trackingManager = new TrackingManager();
+    private final MPVController    mpv    = new MPVController();
+    private final ServerConnection server = new ServerConnection();
     private SyncEngine syncEngine;
 
     private final HeaderBar        headerBar;
@@ -43,7 +40,7 @@ public class MainWindow {
     public MainWindow(Stage stage) {
         this.stage = stage;
 
-        syncEngine = new SyncEngine(mpv, server, trackingManager);
+        syncEngine = new SyncEngine(mpv, server);
 
         headerBar        = new HeaderBar();
         configPanel      = new ConfigPanel(this);
@@ -54,10 +51,6 @@ public class MainWindow {
         trackingPanel    = new TrackingPanel(this);
 
         offsetPanel.setSyncEngine(syncEngine);
-
-        // Wire saved clients from TrackingPanel into TrackingManager
-        trackingManager.setAniListClient(trackingPanel.getAniListClient());
-//        trackingManager.setSeanimeClient(trackingPanel.getSeanimeClient());
 
         buildLayout();
         wireShutdown();
@@ -108,7 +101,7 @@ public class MainWindow {
 
         double savedOffset = offsetPanel.getOffset();
 
-        syncEngine = new SyncEngine(mpv, server, trackingManager);
+        syncEngine = new SyncEngine(mpv, server);
         syncEngine.setOffset(savedOffset);
         offsetPanel.setSyncEngine(syncEngine);
 
@@ -149,13 +142,12 @@ public class MainWindow {
             });
             if (error == null) {
                 try { mpv.waitForExit(); } catch (InterruptedException ignored) {}
-                trackingManager.onPlaybackStopped();
                 Platform.runLater(this::onMpvClosed);
             }
         }, "mpv-launcher").start();
     }
 
-    // ── Launch (playlist) ────────────────────────────────────────────────
+    // ── Launch (playlist) ─────────────────────────────────────────────────
 
     public void onLaunchPlaylist(List<String> entries, int startIndex) {
         new Thread(() -> {
@@ -172,105 +164,6 @@ public class MainWindow {
             });
             if (error == null) {
                 try { mpv.waitForExit(); } catch (InterruptedException ignored) {}
-                trackingManager.onPlaybackStopped();
-                Platform.runLater(this::onMpvClosed);
-            }
-        }, "mpv-launcher").start();
-    }
-
-    // ── Launch Jellyfin episode — also starts session tracking ───────────
-
-    /**
-     * Called by MediaPanel when a Jellyfin episode is selected and launched.
-     * Starts Jellyfin playback session reporting in addition to opening MPV.
-     */
-    public void onJellyfinLaunch(JellyfinItem item, String streamUrl) {
-        new Thread(() -> {
-            String error = mpv.launch(streamUrl);
-            Platform.runLater(() -> {
-                boolean ok = (error == null);
-                mediaPanel.onMpvLaunched(ok);
-                if (ok) {
-                    playbackControls.setEnabled(true);
-                    chatPanel.appendRaw("[system] MPV launched ✓ — " + item.displayLabel());
-                    // Tell TrackingManager a Jellyfin episode started
-                    trackingManager.onJellyfinEpisodeLaunched(item);
-                } else {
-                    showError("Failed to launch MPV", error);
-                }
-            });
-            if (error == null) {
-                try { mpv.waitForExit(); } catch (InterruptedException ignored) {}
-                trackingManager.onPlaybackStopped();
-                Platform.runLater(this::onMpvClosed);
-            }
-        }, "mpv-launcher").start();
-    }
-
-    /**
-     * Called by MediaPanel when launching a Jellyfin season playlist.
-     */
-    public void onJellyfinPlaylistLaunch(List<JellyfinItem> items, List<String> urls,
-                                         int startIndex) {
-        JellyfinItem startItem = items.get(startIndex);
-        new Thread(() -> {
-            String error = mpv.launch(urls, startIndex);
-            Platform.runLater(() -> {
-                boolean ok = (error == null);
-                mediaPanel.onMpvLaunched(ok);
-                if (ok) {
-                    playbackControls.setEnabled(true);
-                    chatPanel.appendRaw("[system] MPV launched ✓ (" + items.size() + " episodes)");
-                    trackingManager.onJellyfinEpisodeLaunched(startItem);
-                } else {
-                    showError("Failed to launch MPV", error);
-                }
-            });
-            if (error == null) {
-                try { mpv.waitForExit(); } catch (InterruptedException ignored) {}
-                trackingManager.onPlaybackStopped();
-                Platform.runLater(this::onMpvClosed);
-            }
-        }, "mpv-launcher").start();
-    }
-
-    /**
-     * Called when advancing to the next Jellyfin episode in a playlist.
-     * Stops tracking for the current episode and starts for the next.
-     */
-    public void onJellyfinNextEpisode(JellyfinItem nextItem) {
-        trackingManager.onPlaybackStopped(); // flush current
-        mpvExecutor.submit(mpv::nextChapter);
-        trackingManager.onJellyfinEpisodeLaunched(nextItem); // start next
-    }
-
-    // ── Local / Seanime launch with AniList tracking ──────────────────────
-
-    /**
-     * Called by MediaPanel for local files when AniList media ID is known.
-     */
-    public void onLocalLaunchWithTracking(List<String> entries, int startIndex,
-                                          int aniListMediaId, String episodeNumber) {
-        new Thread(() -> {
-            String error = entries.size() == 1
-                    ? mpv.launch(entries.get(0))
-                    : mpv.launch(entries, startIndex);
-            Platform.runLater(() -> {
-                boolean ok = (error == null);
-                mediaPanel.onMpvLaunched(ok);
-                if (ok) {
-                    playbackControls.setEnabled(true);
-                    chatPanel.appendRaw("[system] MPV launched ✓");
-                    trackingManager.onLocalEpisodeLaunched(
-                            aniListMediaId, episodeNumber,
-                            entries.isEmpty() ? "" : entries.get(startIndex));
-                } else {
-                    showError("Failed to launch MPV", error);
-                }
-            });
-            if (error == null) {
-                try { mpv.waitForExit(); } catch (InterruptedException ignored) {}
-                trackingManager.onPlaybackStopped();
                 Platform.runLater(this::onMpvClosed);
             }
         }, "mpv-launcher").start();
@@ -296,9 +189,8 @@ public class MainWindow {
 
     // ── Playback actions ──────────────────────────────────────────────────
 
-    public MediaPanel    getMediaPanel()     { return mediaPanel; }
-    public TrackingPanel getTrackingPanel()  { return trackingPanel; }
-    public TrackingManager getTrackingManager() { return trackingManager; }
+    public MediaPanel    getMediaPanel()    { return mediaPanel; }
+    public TrackingPanel getTrackingPanel() { return trackingPanel; }
 
     private final ExecutorService mpvExecutor =
             Executors.newSingleThreadExecutor(r -> {
@@ -307,11 +199,11 @@ public class MainWindow {
                 return t;
             });
 
-    public void doPlay()                    { mpvExecutor.submit(() -> syncEngine.localPlay()); }
-    public void doPause()                   { mpvExecutor.submit(() -> syncEngine.localPause()); }
-    public void doSeek(double pos)          { mpvExecutor.submit(() -> syncEngine.localSeek(pos)); }
-    public void doSkipForward(double s)     { mpvExecutor.submit(() -> syncEngine.localSkipForward(s)); }
-    public void doSkipBackward(double s)    { mpvExecutor.submit(() -> syncEngine.localSkipBackward(s)); }
+    public void doPlay()                 { mpvExecutor.submit(() -> syncEngine.localPlay()); }
+    public void doPause()                { mpvExecutor.submit(() -> syncEngine.localPause()); }
+    public void doSeek(double pos)       { mpvExecutor.submit(() -> syncEngine.localSeek(pos)); }
+    public void doSkipForward(double s)  { mpvExecutor.submit(() -> syncEngine.localSkipForward(s)); }
+    public void doSkipBackward(double s) { mpvExecutor.submit(() -> syncEngine.localSkipBackward(s)); }
 
     // ── Error dialogs ─────────────────────────────────────────────────────
 
@@ -352,7 +244,6 @@ public class MainWindow {
     private void wireShutdown() {
         stage.setOnCloseRequest(e -> {
             mpvExecutor.shutdownNow();
-            trackingManager.close();
             server.disconnect();
             mpv.close();
         });

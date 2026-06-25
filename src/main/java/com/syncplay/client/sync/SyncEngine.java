@@ -2,7 +2,6 @@ package com.syncplay.client.sync;
 
 import com.syncplay.client.mpv.MPVController;
 import com.syncplay.client.network.ServerConnection;
-import com.syncplay.client.tracking.TrackingManager;
 import org.json.*;
 
 import java.util.concurrent.*;
@@ -21,7 +20,6 @@ public class SyncEngine {
 
     private final MPVController    mpv;
     private final ServerConnection server;
-    private final TrackingManager  tracking; // nullable
 
     private volatile double  lastPos       = 0.0;
     private volatile double  mediaDuration = -1.0;
@@ -42,15 +40,9 @@ public class SyncEngine {
 
     // ─────────────────────────────────────────────────────────────
 
-    /** Constructor without tracking (backwards-compatible). */
     public SyncEngine(MPVController mpv, ServerConnection server) {
-        this(mpv, server, null);
-    }
-
-    public SyncEngine(MPVController mpv, ServerConnection server, TrackingManager tracking) {
-        this.mpv      = mpv;
-        this.server   = server;
-        this.tracking = tracking;
+        this.mpv    = mpv;
+        this.server = server;
         hookEvents();
     }
 
@@ -73,8 +65,7 @@ public class SyncEngine {
 
     private double toRemote(double localPos) { return localPos - offsetSeconds; }
     private double toLocal(double remotePos) { return remotePos + offsetSeconds; }
-
-    private double clampRemote(double remotePos) { return Math.max(0.0, remotePos); }
+    private double clampRemote(double pos)   { return Math.max(0.0, pos); }
 
     private double clampLocal(double pos) {
         double hi = mediaDuration > 0 ? mediaDuration : Double.MAX_VALUE;
@@ -99,8 +90,6 @@ public class SyncEngine {
                         if (!msg.isNull("data")) {
                             mediaDuration = msg.getDouble("data");
                             log.info(String.format("Media duration: %.2fs", mediaDuration));
-                            // Tell TrackingManager the duration
-                            if (tracking != null) tracking.onDurationKnown(mediaDuration);
                         }
                     }
                 }
@@ -125,7 +114,6 @@ public class SyncEngine {
         lastPos          = newPos;
         lastPosTimestamp = now;
 
-        // Enforce offset floor
         if (!suppressMpvEvents.get() && newPos < offsetSeconds) {
             log.info(String.format(
                     "Below offset floor %.2fs (local=%.2fs) — snapping back",
@@ -136,9 +124,6 @@ public class SyncEngine {
         }
 
         if (suppressMpvEvents.get() || inStartupWindow()) return;
-
-        // Forward progress to tracking (throttled internally by TrackingManager)
-        if (tracking != null) tracking.onPlaybackProgress(newPos, paused);
 
         double delta = newPos - prev;
         if (Math.abs(delta) > SKIP_THRESHOLD && gap < SEEK_INSTANT_WINDOW_MS) {
@@ -163,9 +148,6 @@ public class SyncEngine {
                     lastPos, toRemote(lastPos)));
             if (isSynced()) server.sendPlay(clampRemote(toRemote(lastPos)));
         }
-
-        // Forward pause state to tracking
-        if (tracking != null) tracking.onPlaybackProgress(lastPos, nowPaused);
     }
 
     // ── Server → MPV ──────────────────────────────────────────────

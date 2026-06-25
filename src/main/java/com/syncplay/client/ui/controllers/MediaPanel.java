@@ -14,6 +14,7 @@ import javafx.stage.FileChooser;
 import java.io.*;
 import java.nio.file.*;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.logging.Logger;
 import java.util.stream.*;
 import java.util.Properties;
@@ -48,20 +49,30 @@ public class MediaPanel {
     private final Button                 nextJfBtn    = new Button("▶▶  Next Episode");
 
     // ── Local file widgets ────────────────────────────────────────────────
-    private final TextField localFileField = field("No file selected");
-    private final Button    browseBtn      = new Button("Browse…");
-    private final Button    launchLocalBtn = new Button("▶  Launch in MPV");
-    private final Button    nextLocalBtn   = new Button("▶▶  Next Episode");
-    private final Label     playlistLabel  = new Label();
+    private final TextField localFileField    = field("No file selected");
+    private final TextField localMediaIdField = field("");
+    private final Button    browseBtn         = new Button("Browse…");
+    private final Button    launchLocalBtn    = new Button("▶  Launch in MPV");
+    private final Button    nextLocalBtn      = new Button("▶▶  Next Episode");
+    private final Label     playlistLabel     = new Label();
 
     // ── State ─────────────────────────────────────────────────────────────
     private JellyfinClient jellyfinClient;
-    private JellyfinItem   currentlyPlayingItem = null; // for session stop + AniList update
+    private JellyfinItem   currentlyPlayingItem = null;
     private SyncMode       currentMode          = SyncMode.JELLYFIN;
     private String         savedLocalFilePath   = "";
 
     private List<String> playlistEntries = new ArrayList<>();
     private int          currentIndex    = 0;
+
+    // Jellyfin progress reporting scheduler
+    private final ScheduledExecutorService progressScheduler =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "jellyfin-progress");
+                t.setDaemon(true);
+                return t;
+            });
+    private ScheduledFuture<?> progressTask;
 
     public MediaPanel(MainWindow owner) {
         this.owner = owner;
@@ -161,6 +172,14 @@ public class MediaPanel {
 
     private void handleNextEpisode(boolean isJellyfin) {
         if (currentIndex >= playlistEntries.size() - 1) return;
+
+        // For Jellyfin — report stop for current, will report start for next after IPC advances
+        if (isJellyfin && currentlyPlayingItem != null && jellyfinClient != null) {
+            final String itemId = currentlyPlayingItem.id();
+            new Thread(() -> jellyfinClient.reportPlaybackStopped(itemId, 0, 0),
+                    "jellyfin-next-stop").start();
+        }
+
         currentIndex++;
         updatePlaylistLabels(isJellyfin);
 
@@ -284,6 +303,9 @@ public class MediaPanel {
         localFileField.setMaxWidth(Double.MAX_VALUE);
         localFileField.setPromptText("Click Browse to pick a file…");
 
+        localMediaIdField.setPromptText("AniList media ID (optional)");
+        localMediaIdField.setMaxWidth(Double.MAX_VALUE);
+
         if (!launchLocalBtn.getStyleClass().contains("green"))
             launchLocalBtn.getStyleClass().add("green");
         launchLocalBtn.setMaxWidth(Double.MAX_VALUE);
@@ -318,6 +340,7 @@ public class MediaPanel {
                 fileRow,
                 playlistLabel,
                 hint,
+                rowLabel("AniList Media ID", localMediaIdField),
                 launchLocalBtn,
                 nextLocalBtn);
         panel.setFillWidth(true);
@@ -359,6 +382,12 @@ public class MediaPanel {
     }
 
     public void onMpvClosed(boolean success) {
+        // Cancel Jellyfin progress reporting
+        if (progressTask != null) {
+            progressTask.cancel(false);
+            progressTask = null;
+        }
+
         launchLocalBtn.setText("▶  Launch in MPV");
         launchLocalBtn.setDisable(false);
         launchJfBtn.setText("▶  Launch in MPV");
@@ -366,19 +395,16 @@ public class MediaPanel {
         nextLocalBtn.setDisable(true);
         nextJfBtn.setDisable(true);
 
-        // Report stop to Jellyfin + update AniList
+        // ── Jellyfin: report stop + update AniList via title search ──────
         if (currentlyPlayingItem != null && jellyfinClient != null) {
             final JellyfinItem item = currentlyPlayingItem;
             currentlyPlayingItem = null;
 
             new Thread(() -> {
-                // 1. Tell Jellyfin playback stopped
                 jellyfinClient.reportPlaybackStopped(item.id(), 0, 0);
 
-                // 2. Update AniList progress via title search
                 AniListClient aniList = owner.getTrackingPanel().getAniListClient();
                 if (aniList != null && aniList.hasToken()) {
-                    // Use series name for TV shows, fall back to item name for movies
                     String searchTitle = (item.seriesName() != null && !item.seriesName().isBlank())
                             ? item.seriesName()
                             : item.name();
@@ -392,6 +418,24 @@ public class MediaPanel {
                     }
                 }
             }, "jellyfin-session-stop").start();
+        }
+
+        // ── Local: update AniList directly via manual media ID ────────────
+        if (currentlyPlayingItem == null && currentMode == SyncMode.LOCAL) {
+            AniListClient aniList = owner.getTrackingPanel().getAniListClient();
+            String mediaIdText = localMediaIdField.getText().trim();
+            if (aniList != null && aniList.hasToken() && !mediaIdText.isEmpty()) {
+                try {
+                    int mediaId  = Integer.parseInt(mediaIdText);
+                    int epNumber = currentIndex + 1; // 1-based
+                    new Thread(() ->
+                            aniList.updateProgress(mediaId, epNumber),
+                            "local-anilist-update").start();
+                    log.info("AniList local: updating mediaId=" + mediaId + " ep=" + epNumber);
+                } catch (NumberFormatException e) {
+                    log.warning("AniList local: invalid media ID '" + mediaIdText + "'");
+                }
+            }
         }
     }
 
@@ -463,7 +507,6 @@ public class MediaPanel {
         JellyfinItem selected = episodesList.getSelectionModel().getSelectedItem();
         if (selected == null || jellyfinClient == null) return;
 
-        // Store for session stop + AniList update when MPV closes
         currentlyPlayingItem = selected;
 
         List<JellyfinItem> allEpisodes = new ArrayList<>(episodesList.getItems());
@@ -474,10 +517,19 @@ public class MediaPanel {
 
         launchPlaylist(urls, startIndex, true);
 
-        // Report playback start to Jellyfin — triggers dashboard + plugins
+        // Report start + start periodic progress reporting
         new Thread(() -> {
             jellyfinClient.reportPlaybackStart(selected.id(), 0, true);
-            jellyfinClient.registerCapabilities(); // re-register so SupportsMediaControl sticks
+            jellyfinClient.registerCapabilities();
+
+            // Schedule progress updates every 10s to keep session alive
+            progressTask = progressScheduler.scheduleAtFixedRate(() -> {
+                if (jellyfinClient != null && currentlyPlayingItem != null) {
+                    jellyfinClient.reportPlaybackProgress(
+                            currentlyPlayingItem.id(), 0, false);
+                }
+            }, 10, 10, TimeUnit.SECONDS);
+
         }, "jellyfin-session-start").start();
     }
 
