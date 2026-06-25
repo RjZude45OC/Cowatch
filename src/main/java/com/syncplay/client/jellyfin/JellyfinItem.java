@@ -8,7 +8,8 @@ public record JellyfinItem(
     String overview,
     int    year,
     int    episodeNumber,
-    int    seasonNumber
+    int    seasonNumber,
+    String seriesName
 ) {
     /** Display label for lists — e.g. "S01E03 - Episode Name" */
     public String displayLabel() {

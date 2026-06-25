@@ -1,9 +1,11 @@
 package com.syncplay.client.ui;
 
+import com.syncplay.client.jellyfin.JellyfinItem;
 import com.syncplay.client.model.*;
 import com.syncplay.client.mpv.MPVController;
 import com.syncplay.client.network.ServerConnection;
 import com.syncplay.client.sync.SyncEngine;
+import com.syncplay.client.tracking.TrackingManager;
 import com.syncplay.client.ui.controllers.*;
 
 import javafx.application.Platform;
@@ -23,8 +25,9 @@ public class MainWindow {
     private final Stage      stage;
     private final BorderPane root = new BorderPane();
 
-    private final MPVController    mpv    = new MPVController();
-    private final ServerConnection server = new ServerConnection();
+    private final MPVController    mpv            = new MPVController();
+    private final ServerConnection server         = new ServerConnection();
+    private final TrackingManager  trackingManager = new TrackingManager();
     private SyncEngine syncEngine;
 
     private final HeaderBar        headerBar;
@@ -33,13 +36,14 @@ public class MainWindow {
     private final ChatPanel        chatPanel;
     private final PlaybackControls playbackControls;
     private final OffsetPanel      offsetPanel;
+    private final TrackingPanel    trackingPanel;
 
     private static final Logger log = Logger.getLogger(MainWindow.class.getName());
 
     public MainWindow(Stage stage) {
         this.stage = stage;
 
-        syncEngine = new SyncEngine(mpv, server);
+        syncEngine = new SyncEngine(mpv, server, trackingManager);
 
         headerBar        = new HeaderBar();
         configPanel      = new ConfigPanel(this);
@@ -47,8 +51,13 @@ public class MainWindow {
         playbackControls = new PlaybackControls(this);
         chatPanel        = new ChatPanel(server);
         offsetPanel      = new OffsetPanel();
+        trackingPanel    = new TrackingPanel(this);
 
         offsetPanel.setSyncEngine(syncEngine);
+
+        // Wire saved clients from TrackingPanel into TrackingManager
+        trackingManager.setAniListClient(trackingPanel.getAniListClient());
+//        trackingManager.setSeanimeClient(trackingPanel.getSeanimeClient());
 
         buildLayout();
         wireShutdown();
@@ -64,9 +73,14 @@ public class MainWindow {
         VBox leftContent = new VBox(8,
                 configPanel.getNode(),
                 offsetPanel.getNode(),
-                playbackControls.getNode());
+                playbackControls.getNode(),
+                trackingPanel.getNode());
         leftContent.setPadding(new Insets(10));
         leftContent.setFillWidth(true);
+
+        ScrollPane leftScroll = new ScrollPane(leftContent);
+        leftScroll.setFitToWidth(true);
+        leftScroll.getStyleClass().add("edge-to-edge");
 
         VBox centre = new VBox(mediaPanel.getNode());
         centre.setPadding(new Insets(10));
@@ -78,7 +92,7 @@ public class MainWindow {
         right.setFillWidth(true);
         VBox.setVgrow(chatPanel.getNode(), Priority.ALWAYS);
 
-        SplitPane split = new SplitPane(leftContent, centre, right);
+        SplitPane split = new SplitPane(leftScroll, centre, right);
         split.getStyleClass().add("app-split");
         split.setDividerPositions(0.27, 0.72);
         root.setCenter(split);
@@ -94,7 +108,7 @@ public class MainWindow {
 
         double savedOffset = offsetPanel.getOffset();
 
-        syncEngine = new SyncEngine(mpv, server);
+        syncEngine = new SyncEngine(mpv, server, trackingManager);
         syncEngine.setOffset(savedOffset);
         offsetPanel.setSyncEngine(syncEngine);
 
@@ -118,7 +132,7 @@ public class MainWindow {
         });
     }
 
-    // ── Launch (single file) ────────────────────────────────────────────
+    // ── Launch (single file / URL) ────────────────────────────────────────
 
     public void onLaunch(String mpvUrl) {
         new Thread(() -> {
@@ -135,17 +149,13 @@ public class MainWindow {
             });
             if (error == null) {
                 try { mpv.waitForExit(); } catch (InterruptedException ignored) {}
+                trackingManager.onPlaybackStopped();
                 Platform.runLater(this::onMpvClosed);
             }
         }, "mpv-launcher").start();
     }
 
-    // ── Launch (playlist — first launch only, multi-entry) ──────────────
-    // Spawns MPV once with the full --playlist + --playlist-start.
-    // After this, advancing episodes should go through onNextEpisode(),
-    // NOT another call to this method — that would kill and restart MPV
-    // (window flicker, re-handshake, and on macOS a teardown race where
-    // the old process's IPC socket isn't fully released before relaunch).
+    // ── Launch (playlist) ────────────────────────────────────────────────
 
     public void onLaunchPlaylist(List<String> entries, int startIndex) {
         new Thread(() -> {
@@ -162,21 +172,116 @@ public class MainWindow {
             });
             if (error == null) {
                 try { mpv.waitForExit(); } catch (InterruptedException ignored) {}
+                trackingManager.onPlaybackStopped();
                 Platform.runLater(this::onMpvClosed);
             }
         }, "mpv-launcher").start();
     }
 
-    // ── Next episode ─────────────────────────────────────────────────────
-    // IPC-only: sends "playlist-next" to the already-running MPV instance.
-    // No process kill, no relaunch, no new socket handshake.
+    // ── Launch Jellyfin episode — also starts session tracking ───────────
+
+    /**
+     * Called by MediaPanel when a Jellyfin episode is selected and launched.
+     * Starts Jellyfin playback session reporting in addition to opening MPV.
+     */
+    public void onJellyfinLaunch(JellyfinItem item, String streamUrl) {
+        new Thread(() -> {
+            String error = mpv.launch(streamUrl);
+            Platform.runLater(() -> {
+                boolean ok = (error == null);
+                mediaPanel.onMpvLaunched(ok);
+                if (ok) {
+                    playbackControls.setEnabled(true);
+                    chatPanel.appendRaw("[system] MPV launched ✓ — " + item.displayLabel());
+                    // Tell TrackingManager a Jellyfin episode started
+                    trackingManager.onJellyfinEpisodeLaunched(item);
+                } else {
+                    showError("Failed to launch MPV", error);
+                }
+            });
+            if (error == null) {
+                try { mpv.waitForExit(); } catch (InterruptedException ignored) {}
+                trackingManager.onPlaybackStopped();
+                Platform.runLater(this::onMpvClosed);
+            }
+        }, "mpv-launcher").start();
+    }
+
+    /**
+     * Called by MediaPanel when launching a Jellyfin season playlist.
+     */
+    public void onJellyfinPlaylistLaunch(List<JellyfinItem> items, List<String> urls,
+                                         int startIndex) {
+        JellyfinItem startItem = items.get(startIndex);
+        new Thread(() -> {
+            String error = mpv.launch(urls, startIndex);
+            Platform.runLater(() -> {
+                boolean ok = (error == null);
+                mediaPanel.onMpvLaunched(ok);
+                if (ok) {
+                    playbackControls.setEnabled(true);
+                    chatPanel.appendRaw("[system] MPV launched ✓ (" + items.size() + " episodes)");
+                    trackingManager.onJellyfinEpisodeLaunched(startItem);
+                } else {
+                    showError("Failed to launch MPV", error);
+                }
+            });
+            if (error == null) {
+                try { mpv.waitForExit(); } catch (InterruptedException ignored) {}
+                trackingManager.onPlaybackStopped();
+                Platform.runLater(this::onMpvClosed);
+            }
+        }, "mpv-launcher").start();
+    }
+
+    /**
+     * Called when advancing to the next Jellyfin episode in a playlist.
+     * Stops tracking for the current episode and starts for the next.
+     */
+    public void onJellyfinNextEpisode(JellyfinItem nextItem) {
+        trackingManager.onPlaybackStopped(); // flush current
+        mpvExecutor.submit(mpv::nextChapter);
+        trackingManager.onJellyfinEpisodeLaunched(nextItem); // start next
+    }
+
+    // ── Local / Seanime launch with AniList tracking ──────────────────────
+
+    /**
+     * Called by MediaPanel for local files when AniList media ID is known.
+     */
+    public void onLocalLaunchWithTracking(List<String> entries, int startIndex,
+                                          int aniListMediaId, String episodeNumber) {
+        new Thread(() -> {
+            String error = entries.size() == 1
+                    ? mpv.launch(entries.get(0))
+                    : mpv.launch(entries, startIndex);
+            Platform.runLater(() -> {
+                boolean ok = (error == null);
+                mediaPanel.onMpvLaunched(ok);
+                if (ok) {
+                    playbackControls.setEnabled(true);
+                    chatPanel.appendRaw("[system] MPV launched ✓");
+                    trackingManager.onLocalEpisodeLaunched(
+                            aniListMediaId, episodeNumber,
+                            entries.isEmpty() ? "" : entries.get(startIndex));
+                } else {
+                    showError("Failed to launch MPV", error);
+                }
+            });
+            if (error == null) {
+                try { mpv.waitForExit(); } catch (InterruptedException ignored) {}
+                trackingManager.onPlaybackStopped();
+                Platform.runLater(this::onMpvClosed);
+            }
+        }, "mpv-launcher").start();
+    }
+
+    // ── Next episode (IPC only) ───────────────────────────────────────────
 
     public void onNextEpisode() {
         if (!mpv.isRunning()) {
-            // Defensive — MediaPanel disables the Next button when MPV isn't
-            // running, so this is only reachable if MPV died unexpectedly
-            // between the button becoming enabled and being clicked.
-            showError("MPV Not Running", "The player closed unexpectedly. Please launch again to continue.");
+            showError("MPV Not Running",
+                    "The player closed unexpectedly. Please launch again to continue.");
             mediaPanel.onMpvClosed(true);
             return;
         }
@@ -191,7 +296,9 @@ public class MainWindow {
 
     // ── Playback actions ──────────────────────────────────────────────────
 
-    public MediaPanel getMediaPanel() { return mediaPanel; }
+    public MediaPanel    getMediaPanel()     { return mediaPanel; }
+    public TrackingPanel getTrackingPanel()  { return trackingPanel; }
+    public TrackingManager getTrackingManager() { return trackingManager; }
 
     private final ExecutorService mpvExecutor =
             Executors.newSingleThreadExecutor(r -> {
@@ -200,22 +307,15 @@ public class MainWindow {
                 return t;
             });
 
-    public void doPlay()                   { mpvExecutor.submit(() -> syncEngine.localPlay()); }
-    public void doPause()                  { mpvExecutor.submit(() -> syncEngine.localPause()); }
-    public void doSeek(double pos)         { mpvExecutor.submit(() -> syncEngine.localSeek(pos)); }
-    public void doSkipForward(double s)    { mpvExecutor.submit(() -> syncEngine.localSkipForward(s)); }
-    public void doSkipBackward(double s)   { mpvExecutor.submit(() -> syncEngine.localSkipBackward(s)); }
+    public void doPlay()                    { mpvExecutor.submit(() -> syncEngine.localPlay()); }
+    public void doPause()                   { mpvExecutor.submit(() -> syncEngine.localPause()); }
+    public void doSeek(double pos)          { mpvExecutor.submit(() -> syncEngine.localSeek(pos)); }
+    public void doSkipForward(double s)     { mpvExecutor.submit(() -> syncEngine.localSkipForward(s)); }
+    public void doSkipBackward(double s)    { mpvExecutor.submit(() -> syncEngine.localSkipBackward(s)); }
 
     // ── Error dialogs ─────────────────────────────────────────────────────
 
-    /**
-     * Show a detailed error dialog with a title and body message.
-     * Body is shown in a scrollable text area so long messages (e.g. install instructions)
-     * are fully readable without the dialog being cut off.
-     */
-    public void showError(String title, String body) {
-        showError(title, body, null);
-    }
+    public void showError(String title, String body) { showError(title, body, null); }
 
     public void showError(String title, String body, Runnable onClose) {
         Platform.runLater(() -> {
@@ -224,7 +324,6 @@ public class MainWindow {
             alert.setHeaderText(title);
             alert.initOwner(stage);
 
-            // Use expandable text area for long messages
             TextArea textArea = new TextArea(body);
             textArea.setEditable(false);
             textArea.setWrapText(true);
@@ -246,16 +345,14 @@ public class MainWindow {
         });
     }
 
-    /** Convenience overload — simple one-string error with no callback. */
-    public void showError(String msg) {
-        showError("Error", msg, null);
-    }
+    public void showError(String msg) { showError("Error", msg, null); }
 
     // ── Shutdown ──────────────────────────────────────────────────────────
 
     private void wireShutdown() {
         stage.setOnCloseRequest(e -> {
             mpvExecutor.shutdownNow();
+            trackingManager.close();
             server.disconnect();
             mpv.close();
         });
