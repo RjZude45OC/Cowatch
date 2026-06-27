@@ -127,6 +127,7 @@ public class TrackingPanel {
             aniListTokenField.setText(token);
             if (!token.isEmpty()) {
                 aniListClient = new AniListClient(token);
+                verifyAniList();
             }
         } catch (IOException ignored) {}
     }
