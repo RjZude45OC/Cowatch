@@ -6,17 +6,6 @@ import java.net.http.*;
 import java.time.Duration;
 import java.util.logging.*;
 
-/**
- * AniList GraphQL API client.
- *
- * Requires a user OAuth token — get one from:
- *   https://anilist.co/settings/developer
- * Create an API client there, then use the implicit OAuth flow to get a token.
- * Paste the token into SyncPlay settings — no full OAuth flow needed in-app.
- *
- * Key mutation: SaveMediaListEntry — marks an episode as watched and
- * updates progress on the user's list.
- */
 public class AniListClient {
 
     private static final Logger log = Logger.getLogger(AniListClient.class.getName());
@@ -32,102 +21,166 @@ public class AniListClient {
                 .build();
     }
 
-    // ─── Progress update ──────────────────────────────────────────────────
+    // ─── Progress update (full logic from Seanime section 4) ──────────────
 
     /**
-     * Update watch progress for a media entry.
-     * Sets status to CURRENT if not already watching, increments progress
-     * to the given episode number.
+     * Update AniList progress for a media entry.
      *
-     * @param mediaId       AniList media ID (not episode ID)
-     * @param episodeNumber episode number just watched (1-based)
+     * Implements Seanime's update rules:
+     *   - Auto-completes if newProgress >= totalEpisodeCount (and count is known)
+     *   - Preserves REPEATING status if user is rewatching
+     *   - Clamps progress to totalEpisodeCount if it would exceed it
+     *   - Sets status to CURRENT if not yet started
+     *
+     * @param mediaId           AniList media ID
+     * @param episodeNumber     relative episode number (1-based, AniList-relative)
+     * @param totalEpisodeCount total episodes in this media entry (0 if unknown)
      */
-    public void updateProgress(int mediaId, int episodeNumber) {
-        if (token == null || token.isBlank()) {
-            log.warning("AniList: no token configured, skipping progress update");
-            return;
-        }
-        // Guard: a bad/unset mediaId (e.g. -1 from a failed searchMediaId call)
-        // is the #1 cause of a silent 400 here. Catch it before it hits the wire.
-        if (mediaId <= 0) {
-            log.warning("AniList: refusing to update progress, invalid mediaId=" + mediaId);
-            return;
-        }
-        if (episodeNumber < 0) {
-            log.warning("AniList: refusing to update progress, invalid episodeNumber=" + episodeNumber);
-            return;
+    public void updateProgress(int mediaId, int episodeNumber, int totalEpisodeCount) {
+        if (token == null || token.isBlank()) return;
+        if (mediaId <= 0) { log.warning("AniList: invalid mediaId=" + mediaId); return; }
+        if (episodeNumber < 0) { log.warning("AniList: invalid ep=" + episodeNumber); return; }
+
+        // Clamp to total episode count
+        int clampedEp = (totalEpisodeCount > 0 && episodeNumber > totalEpisodeCount)
+                ? totalEpisodeCount
+                : episodeNumber;
+
+        // Auto-complete if watched last episode
+        String status;
+        if (totalEpisodeCount > 0 && clampedEp >= totalEpisodeCount) {
+            status = "COMPLETED";
+        } else {
+            // Check current status — preserve REPEATING if rewatching
+            status = getCurrentStatusOrDefault(mediaId);
         }
 
         String mutation =
-                "mutation ($mediaId: Int, $progress: Int) {" +
-                        "  SaveMediaListEntry(mediaId: $mediaId, progress: $progress, status: CURRENT) {" +
+                "mutation ($mediaId: Int, $progress: Int, $status: MediaListStatus) {" +
+                        "  SaveMediaListEntry(mediaId: $mediaId, progress: $progress, status: $status) {" +
                         "    id progress status" +
                         "  }" +
                         "}";
 
         JSONObject variables = new JSONObject();
         variables.put("mediaId",  mediaId);
-        variables.put("progress", episodeNumber);
+        variables.put("progress", clampedEp);
+        variables.put("status",   status);
 
         try {
             JSONObject result = graphql(mutation, variables);
             if (result != null) {
                 log.info("AniList: updated mediaId=" + mediaId
-                        + " progress=" + episodeNumber);
+                        + " progress=" + clampedEp + " status=" + status);
             }
         } catch (Exception e) {
             log.warning("AniList updateProgress failed: " + e.getMessage());
         }
     }
 
-    /**
-     * Search AniList for an anime by title and return its media ID.
-     * Used when playing local files where you don't have an AniList ID directly.
-     *
-     * @param title anime title (romaji, english, or native)
-     * @return AniList media ID, or -1 if not found
-     */
-    public int searchMediaId(String title) {
-        if (token == null || token.isBlank()) return -1;
-        if (title == null || title.isBlank()) {
-            log.warning("AniList: searchMediaId called with empty title");
-            return -1;
-        }
+    /** Convenience overload — no total episode count known. */
+    public void updateProgress(int mediaId, int episodeNumber) {
+        updateProgress(mediaId, episodeNumber, 0);
+    }
 
-        String query =
-                "query ($search: String) {" +
-                        "  Media(search: $search, type: ANIME) {" +
-                        "    id title { romaji english native }" +
-                        "  }" +
-                        "}";
+    // ─── Current status check (for REPEATING preservation) ────────────────
+
+    private String getCurrentStatusOrDefault(int mediaId) {
+        try {
+            String query =
+                    "query ($mediaId: Int) {" +
+                            "  MediaList(mediaId: $mediaId, userName: null) {" +
+                            "    status" +
+                            "  }" +
+                            "}";
+            JSONObject variables = new JSONObject();
+            variables.put("mediaId", mediaId);
+
+            JSONObject result = graphql(query, variables);
+            if (result == null) return "CURRENT";
+
+            JSONObject data = result.optJSONObject("data");
+            if (data == null) return "CURRENT";
+
+            JSONObject list = data.optJSONObject("MediaList");
+            if (list == null) return "CURRENT";
+
+            String status = list.optString("status", "CURRENT");
+            // Preserve REPEATING — don't flip back to CURRENT on rewatch
+            return "REPEATING".equals(status) ? "REPEATING" : "CURRENT";
+        } catch (Exception e) {
+            return "CURRENT";
+        }
+    }
+
+    // ─── Search by title + optional year ──────────────────────────────────
+
+    public int searchMediaId(String title) {
+        return searchMediaId(title, 0);
+    }
+
+    /**
+     * Search AniList for media by title and optional year.
+     * Using seasonYear avoids returning the wrong season for multi-season series.
+     * Falls back to no-year search if year-filtered search returns nothing.
+     */
+    public int searchMediaId(String title, int year) {
+        if (token == null || token.isBlank()) return -1;
+        if (title == null || title.isBlank()) return -1;
 
         JSONObject variables = new JSONObject();
         variables.put("search", title);
 
+        String query;
+        if (year > 0) {
+            query =
+                    "query ($search: String, $year: Int) {" +
+                            "  Media(search: $search, type: ANIME, seasonYear: $year, sort: POPULARITY_DESC) {" +
+                            "    id title { romaji english native }" +
+                            "  }" +
+                            "}";
+            variables.put("year", year);
+            log.info("AniList: searching '" + title + "' year=" + year);
+        } else {
+            query =
+                    "query ($search: String) {" +
+                            "  Media(search: $search, type: ANIME, sort: POPULARITY_DESC) {" +
+                            "    id title { romaji english native }" +
+                            "  }" +
+                            "}";
+            log.info("AniList: searching '" + title + "' (no year)");
+        }
+
         try {
             JSONObject result = graphql(query, variables);
             if (result == null) return -1;
+
             JSONObject data = result.optJSONObject("data");
             if (data == null || data.isNull("Media")) {
-                log.warning("AniList: no media match for title='" + title + "'");
+                if (year > 0) {
+                    log.warning("AniList: no result for '" + title + "' year=" + year
+                            + " — retrying without year");
+                    return searchMediaId(title, 0);
+                }
+                log.warning("AniList: no match for '" + title + "'");
                 return -1;
             }
-            return data.getJSONObject("Media").getInt("id");
+
+            int id = data.getJSONObject("Media").getInt("id");
+            log.info("AniList: found mediaId=" + id + " for '" + title + "'");
+            return id;
         } catch (Exception e) {
-            log.warning("AniList search failed for title='" + title + "': " + e.getMessage());
+            log.warning("AniList search failed '" + title + "': " + e.getMessage());
             return -1;
         }
     }
 
-    /**
-     * Verify the token works by fetching the viewer's username.
-     * @return username on success, null on failure.
-     */
+    // ─── Token verify ─────────────────────────────────────────────────────
+
     public String verifyToken() {
         if (token == null || token.isBlank()) return null;
-        String query = "query { Viewer { id name } }";
         try {
-            JSONObject result = graphql(query, new JSONObject());
+            JSONObject result = graphql("query { Viewer { id name } }", new JSONObject());
             if (result == null) return null;
             return result.getJSONObject("data").getJSONObject("Viewer").getString("name");
         } catch (Exception e) {
@@ -154,24 +207,16 @@ public class AniListClient {
 
         HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
 
-        if (res.statusCode() == 401) {
-            log.warning("AniList: token is invalid or expired");
-            return null;
-        }
-        if (res.statusCode() == 429) {
-            log.warning("AniList: rate limited");
-            return null;
-        }
+        if (res.statusCode() == 401) { log.warning("AniList: token invalid/expired"); return null; }
+        if (res.statusCode() == 429) { log.warning("AniList: rate limited"); return null; }
         if (res.statusCode() != 200) {
-            // Previously this swallowed the body, so 400s were undiagnosable.
-            // The body usually contains the exact GraphQL validation error.
-            log.warning("AniList GraphQL returned " + res.statusCode() + ": " + res.body());
+            log.warning("AniList GraphQL " + res.statusCode() + ": " + res.body());
             return null;
         }
 
         JSONObject json = new JSONObject(res.body());
         if (json.has("errors")) {
-            log.warning("AniList GraphQL errors: " + json.getJSONArray("errors"));
+            log.warning("AniList errors: " + json.getJSONArray("errors"));
             return null;
         }
         return json;

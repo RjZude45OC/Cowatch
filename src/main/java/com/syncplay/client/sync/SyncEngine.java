@@ -18,6 +18,9 @@ public class SyncEngine {
     private static final long   SEEK_INSTANT_WINDOW_MS = 300;
     private static final long   STARTUP_QUIET_MS       = 1_500;
 
+    // Fraction of total duration considered "watched" for tracking purposes (AniList, etc).
+    private static final double WATCHED_THRESHOLD_RATIO = 0.8;
+
     private final MPVController    mpv;
     private final ServerConnection server;
 
@@ -30,6 +33,50 @@ public class SyncEngine {
     private long connectTime      = System.currentTimeMillis();
 
     private final AtomicBoolean suppressMpvEvents = new AtomicBoolean(false);
+
+    // Latches true the first time playback crosses WATCHED_THRESHOLD_RATIO for the
+    // current file. Must be cleared via resetWatchedTracking() whenever a new file
+    // is loaded, otherwise it never fires again after the first episode.
+    private final AtomicBoolean watchedThresholdFired = new AtomicBoolean(false);
+    private volatile WatchedThresholdListener watchedThresholdListener;
+    private volatile PlaylistPositionListener playlistPositionListener;
+
+    /** Notified once per file when playback crosses WATCHED_THRESHOLD_RATIO of duration. */
+    public interface WatchedThresholdListener {
+        /** Called on the mpv event-reader thread — do blocking work (network calls) off-thread. */
+        void onWatchedThresholdReached();
+    }
+
+    /**
+     * Notified whenever mpv's own playlist-pos changes — including mpv auto-advancing
+     * through a multi-episode playlist entirely on its own, with no UI interaction.
+     * The owner (e.g. MediaPanel) MUST use this to keep its own "current episode index"
+     * state in sync, or it will silently go stale once mpv advances internally.
+     */
+    public interface PlaylistPositionListener {
+        /** Called on the mpv event-reader thread. newIndex is mpv's 0-based playlist-pos. */
+        void onPlaylistPositionChanged(int newIndex);
+    }
+
+    public void setWatchedThresholdListener(WatchedThresholdListener listener) {
+        this.watchedThresholdListener = listener;
+    }
+
+    public void setPlaylistPositionListener(PlaylistPositionListener listener) {
+        this.playlistPositionListener = listener;
+    }
+
+    /**
+     * Resets the 80%-watched latch and forgets the previously known duration.
+     * MUST be called every time a new file/episode is loaded into mpv — including
+     * the first file of a session and every "next episode" advance — otherwise the
+     * threshold will only ever fire once, for the very first file played.
+     */
+    public void resetWatchedTracking() {
+        watchedThresholdFired.set(false);
+        mediaDuration = -1.0;
+    }
+
 
     private final ScheduledExecutorService suppressScheduler =
             Executors.newSingleThreadScheduledExecutor(r -> {
@@ -74,6 +121,12 @@ public class SyncEngine {
 
     // ── MPV → Server ──────────────────────────────────────────────
 
+    // Tracks mpv's own internal playlist-pos so we can detect when mpv
+    // auto-advances to the next entry on its own (e.g. an entire season
+    // loaded as one --playlist), which the caller's launchPlaylist()/
+    // handleNextEpisode() never sees and therefore never resets for.
+    private volatile int lastKnownPlaylistPos = -2; // -2 = "not yet known", distinct from mpv's own -1
+
     private void onMpvEvent(String rawJson) {
         if (rawJson.isBlank()) return;
         try {
@@ -92,6 +145,11 @@ public class SyncEngine {
                             log.info(String.format("Media duration: %.2fs", mediaDuration));
                         }
                     }
+                    case "playlist-pos" -> {
+                        if (!msg.isNull("data")) {
+                            handlePlaylistPosChange(msg.getInt("data"));
+                        }
+                    }
                 }
                 return;
             }
@@ -106,6 +164,28 @@ public class SyncEngine {
         }
     }
 
+    /**
+     * Fires whenever mpv's playlist-pos property changes. This catches BOTH
+     * user-triggered "next episode" clicks AND mpv auto-advancing through a
+     * multi-episode playlist entirely on its own (no application code involved).
+     * Ignores mpv's transient -1 (briefly reported during some transitions/at
+     * playlist end) so it never resets onto a non-entry.
+     */
+    private void handlePlaylistPosChange(int newPos) {
+        int prev = lastKnownPlaylistPos;
+        if (newPos < 0) return; // transient/no-current-entry — ignore, don't reset on this
+
+        if (prev != -2 && newPos != prev) {
+            log.info("Playlist position changed: " + prev + " → " + newPos + " — resetting watched tracking");
+
+            PlaylistPositionListener listener = playlistPositionListener;
+            if (listener != null) listener.onPlaylistPositionChanged(newPos);
+
+            resetWatchedTracking();
+        }
+        lastKnownPlaylistPos = newPos;
+    }
+
     private void handlePositionChange(double newPos) {
         long   now  = System.currentTimeMillis();
         long   gap  = lastPosTimestamp == 0 ? Long.MAX_VALUE : now - lastPosTimestamp;
@@ -113,6 +193,8 @@ public class SyncEngine {
 
         lastPos          = newPos;
         lastPosTimestamp = now;
+
+        checkWatchedThreshold(newPos);
 
         if (!suppressMpvEvents.get() && newPos < offsetSeconds) {
             log.info(String.format(
@@ -130,6 +212,27 @@ public class SyncEngine {
             log.info(String.format("Seek: %.2f→%.2f Δ%.1fs gap %dms",
                     prev, newPos, delta, gap));
             if (isSynced()) server.sendSeek(clampRemote(toRemote(newPos)));
+        }
+    }
+
+    /**
+     * Fires watchedThresholdListener once per file, the first time playback
+     * crosses WATCHED_THRESHOLD_RATIO of the known duration. No-ops until mpv
+     * has reported a real duration (mediaDuration is -1.0 until then), so this
+     * never misfires off a missing/zero duration.
+     */
+    private void checkWatchedThreshold(double pos) {
+        if (mediaDuration <= 0) return; // duration not known yet — nothing to compare against
+        if (watchedThresholdFired.get()) return; // already fired for this file
+
+        if (pos / mediaDuration >= WATCHED_THRESHOLD_RATIO) {
+            if (watchedThresholdFired.compareAndSet(false, true)) {
+                log.info(String.format(
+                        "Watched threshold reached: %.2fs / %.2fs (%.0f%%)",
+                        pos, mediaDuration, (pos / mediaDuration) * 100));
+                WatchedThresholdListener listener = watchedThresholdListener;
+                if (listener != null) listener.onWatchedThresholdReached();
+            }
         }
     }
 

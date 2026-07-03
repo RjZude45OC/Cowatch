@@ -42,6 +42,7 @@
             <artifactId>jna-platform</artifactId>
             <version>5.14.0</version>
         </dependency>
+
     </dependencies>
 
     <build>

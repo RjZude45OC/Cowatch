@@ -2,7 +2,9 @@ package com.syncplay.client.ui.controllers;
 
 import com.syncplay.client.jellyfin.*;
 import com.syncplay.client.model.SyncMode;
+import com.syncplay.client.sync.SyncEngine;
 import com.syncplay.client.tracking.AniListClient;
+import com.syncplay.client.tracking.AniZipClient;
 import com.syncplay.client.ui.MainWindow;
 
 import javafx.application.Platform;
@@ -15,7 +17,9 @@ import java.io.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
+import java.util.regex.*;
 import java.util.stream.*;
 import java.util.Properties;
 
@@ -28,10 +32,27 @@ public class MediaPanel {
             "mp4","mkv","avi","mov","flv","wmv","m4v","ts","webm","ogv"
     );
 
-    private final MainWindow owner;
-    private final VBox       node        = new VBox(12);
-    private final VBox       card        = new VBox(10);
-    private final StackPane  contentArea = new StackPane();
+    // Matches "[SubsPlease] Show - 08 (1080p).mkv", "Show S01E08.mkv", "Show E08.mkv"
+    private static final Pattern EP_PATTERN = Pattern.compile(
+            "(?:- (\\d+) |S\\d+E(\\d+)|[Ee][Pp]?(\\d+))"
+    );
+
+    // ── Title-parsing patterns (torrent release-name conventions) ─────────
+    // Matches a leading [ReleaseGroup] tag
+    private static final Pattern GROUP_TAG = Pattern.compile("^\\[[^\\]]+\\]\\s*");
+    // Matches a trailing 8-char hex checksum tag, e.g. [A33A2091]
+    private static final Pattern CHECKSUM_TAG = Pattern.compile("\\s*\\[[0-9A-Fa-f]{8}\\]\\s*$");
+    // Matches a trailing resolution/quality tag, e.g. (1080p), (720p Hi10)
+    private static final Pattern QUALITY_TAG = Pattern.compile("\\s*\\((?:480|720|1080|2160)p[^)]*\\)\\s*$");
+    // Cuts the title at the trailing " - NN" episode marker
+    private static final Pattern TRAILING_EP_MARKER = Pattern.compile("\\s-\\s\\d+\\s*$");
+
+    private final MainWindow  owner;
+    private final AniZipClient aniZip = new AniZipClient();
+
+    private final VBox      node        = new VBox(12);
+    private final VBox      card        = new VBox(10);
+    private final StackPane contentArea = new StackPane();
 
     // ── Jellyfin widgets ──────────────────────────────────────────────────
     private final TextField     jellyfinUrlField  = field("https://jellyfin.example.com");
@@ -50,7 +71,6 @@ public class MediaPanel {
 
     // ── Local file widgets ────────────────────────────────────────────────
     private final TextField localFileField    = field("No file selected");
-    private final TextField localMediaIdField = field("");
     private final Button    browseBtn         = new Button("Browse…");
     private final Button    launchLocalBtn    = new Button("▶  Launch in MPV");
     private final Button    nextLocalBtn      = new Button("▶▶  Next Episode");
@@ -58,14 +78,23 @@ public class MediaPanel {
 
     // ── State ─────────────────────────────────────────────────────────────
     private JellyfinClient jellyfinClient;
-    private JellyfinItem   currentlyPlayingItem = null;
-    private SyncMode       currentMode          = SyncMode.JELLYFIN;
-    private String         savedLocalFilePath   = "";
+    private SyncEngine      syncEngine; // set via setSyncEngine() once constructed by the owner
+    private SyncMode       currentMode        = SyncMode.JELLYFIN;
+    private String         savedLocalFilePath = "";
 
-    private List<String> playlistEntries = new ArrayList<>();
-    private int          currentIndex    = 0;
+    // Playlist state
+    private List<String>       playlistEntries    = new ArrayList<>();
+    private List<JellyfinItem> jfEpisodeList      = new ArrayList<>(); // mirrors playlist for Jellyfin
+    private int                currentIndex       = 0;
+    private String             currentLocalFile   = ""; // updated as playlist advances
 
-    // Jellyfin progress reporting scheduler
+    // Guards against the 80%-watched threshold firing more than once for the
+    // same episode (SyncEngine's own internal latch should already prevent
+    // this, but this is a second, panel-local safety net).
+    // Reset every time a new episode starts playing.
+    private final AtomicBoolean reportedThisEpisode = new AtomicBoolean(false);
+
+    // Jellyfin progress reporting
     private final ScheduledExecutorService progressScheduler =
             Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, "jellyfin-progress");
@@ -78,6 +107,21 @@ public class MediaPanel {
         this.owner = owner;
         loadPrefs();
         build();
+    }
+
+    /**
+     * Wires this panel to the SyncEngine driving mpv, so the 80%-watched
+     * threshold can trigger AniList updates without waiting for mpv to close,
+     * and so currentIndex stays correct when mpv auto-advances its own
+     * internal playlist (e.g. an entire season loaded as one --playlist).
+     * Call once, after both this panel and the SyncEngine have been constructed.
+     */
+    public void setSyncEngine(SyncEngine engine) {
+        this.syncEngine = engine;
+        if (this.syncEngine != null) {
+            this.syncEngine.setWatchedThresholdListener(this::onWatchedThresholdReached);
+            this.syncEngine.setPlaylistPositionListener(this::onPlaylistPositionChanged);
+        }
     }
 
     private void build() {
@@ -94,7 +138,6 @@ public class MediaPanel {
 
         card.getChildren().addAll(heading, contentArea);
         node.getChildren().add(card);
-
         showJellyfinPanel();
     }
 
@@ -112,15 +155,55 @@ public class MediaPanel {
     private void showJellyfinPanel() { contentArea.getChildren().setAll(buildJellyfinPanel()); }
     private void showLocalPanel()    { contentArea.getChildren().setAll(buildLocalPanel()); }
 
+    // ── Episode number helpers ────────────────────────────────────────────
+
+    private int parseEpisodeNumber(String filePath) {
+        String name = new File(filePath).getName();
+        Matcher m = EP_PATTERN.matcher(name);
+        if (m.find()) {
+            for (int i = 1; i <= m.groupCount(); i++) {
+                if (m.group(i) != null) {
+                    try { return Integer.parseInt(m.group(i)); }
+                    catch (NumberFormatException ignored) {}
+                }
+            }
+        }
+        log.warning("Could not parse episode from: " + name + " — using index " + (currentIndex + 1));
+        return currentIndex + 1;
+    }
+
+    /**
+     * Extracts a clean series title from a torrent-style release filename, e.g.
+     * "[SubsPlease] Show Name - 08 (1080p) [A33A2091].mkv" -> "Show Name"
+     * Strips extension, release group, checksum, and quality tags, then cuts at
+     * the trailing episode marker. Best-effort — feed the result to AniList's
+     * fuzzy search, never assume it's an exact title.
+     */
+    private String parseSeriesTitle(String filePath) {
+        String name = new File(filePath).getName();
+
+        int dot = name.lastIndexOf('.');
+        if (dot > 0) name = name.substring(0, dot);
+
+        name = GROUP_TAG.matcher(name).replaceFirst("");
+        name = CHECKSUM_TAG.matcher(name).replaceAll("");
+        name = QUALITY_TAG.matcher(name).replaceAll("");
+
+        Matcher epCut = TRAILING_EP_MARKER.matcher(name);
+        if (epCut.find()) {
+            name = name.substring(0, epCut.start());
+        }
+
+        return name.trim();
+    }
+
     // ── Playlist core logic ───────────────────────────────────────────────
 
     private List<String> buildLocalPlaylist(File selectedFile) {
         File dir = selectedFile.getParentFile();
         if (dir == null || !dir.isDirectory()) return List.of(selectedFile.getAbsolutePath());
-
         File[] siblings = dir.listFiles(f -> f.isFile() && isVideoFile(f.getName()));
         if (siblings == null || siblings.length == 0) return List.of(selectedFile.getAbsolutePath());
-
         return Arrays.stream(siblings)
                 .sorted(Comparator.comparing(f -> f.getName().toLowerCase()))
                 .map(File::getAbsolutePath)
@@ -128,38 +211,34 @@ public class MediaPanel {
     }
 
     private int findIndex(List<String> entries, String target) {
-        for (int i = 0; i < entries.size(); i++) {
+        for (int i = 0; i < entries.size(); i++)
             if (entries.get(i).equals(target)) return i;
-        }
         return 0;
     }
 
     private boolean isVideoFile(String name) {
         int dot = name.lastIndexOf('.');
-        if (dot < 0) return false;
-        return VIDEO_EXTS.contains(name.substring(dot + 1).toLowerCase());
+        return dot >= 0 && VIDEO_EXTS.contains(name.substring(dot + 1).toLowerCase());
     }
 
     private void launchPlaylist(List<String> entries, int startIndex, boolean isJellyfin) {
         if (entries.isEmpty()) return;
         playlistEntries = new ArrayList<>(entries);
         currentIndex    = Math.max(0, Math.min(startIndex, entries.size() - 1));
+        if (!isJellyfin && !entries.isEmpty())
+            currentLocalFile = entries.get(currentIndex);
+
+        // New episode is about to play — reset both the 80%-watched latch
+        // (SyncEngine) and our own "already reported" guard.
+        resetWatchedTrackingForNewEpisode();
 
         updatePlaylistLabels(isJellyfin);
 
-        if (isJellyfin) {
-            launchJfBtn.setDisable(true);
-            launchJfBtn.setText("Launching…");
-        } else {
-            launchLocalBtn.setDisable(true);
-            launchLocalBtn.setText("Launching…");
-        }
+        if (isJellyfin) { launchJfBtn.setDisable(true); launchJfBtn.setText("Launching…"); }
+        else             { launchLocalBtn.setDisable(true); launchLocalBtn.setText("Launching…"); }
 
-        if (entries.size() == 1) {
-            owner.onLaunch(entries.get(0));
-        } else {
-            owner.onLaunchPlaylist(entries, startIndex);
-        }
+        if (entries.size() == 1) owner.onLaunch(entries.get(0));
+        else                     owner.onLaunchPlaylist(entries, startIndex);
     }
 
     private void updatePlaylistLabels(boolean isJellyfin) {
@@ -173,25 +252,72 @@ public class MediaPanel {
     private void handleNextEpisode(boolean isJellyfin) {
         if (currentIndex >= playlistEntries.size() - 1) return;
 
-        // For Jellyfin — report stop for current, will report start for next after IPC advances
-        if (isJellyfin && currentlyPlayingItem != null && jellyfinClient != null) {
-            final String itemId = currentlyPlayingItem.id();
+        // Report stop for current Jellyfin episode before advancing
+        if (isJellyfin && !jfEpisodeList.isEmpty()
+                && currentIndex < jfEpisodeList.size()
+                && jellyfinClient != null) {
+            final String itemId = jfEpisodeList.get(currentIndex).id();
             new Thread(() -> jellyfinClient.reportPlaybackStopped(itemId, 0, 0),
                     "jellyfin-next-stop").start();
         }
 
         currentIndex++;
+
+        if (!isJellyfin && currentIndex < playlistEntries.size())
+            currentLocalFile = playlistEntries.get(currentIndex);
+
+        // New episode — reset watched tracking again.
+        resetWatchedTrackingForNewEpisode();
+
         updatePlaylistLabels(isJellyfin);
 
-        if (isJellyfin) {
-            launchJfBtn.setDisable(true);
-            launchJfBtn.setText("Launching…");
-        } else {
-            launchLocalBtn.setDisable(true);
-            launchLocalBtn.setText("Launching…");
-        }
+        if (isJellyfin) { launchJfBtn.setDisable(true); launchJfBtn.setText("Launching…"); }
+        else             { launchLocalBtn.setDisable(true); launchLocalBtn.setText("Launching…"); }
 
         owner.onNextEpisode();
+    }
+
+    /**
+     * Called by SyncEngine when mpv's own playlist-pos changes — covers mpv
+     * auto-advancing through an entire season loaded as one --playlist, which
+     * never goes through handleNextEpisode()/owner.onNextEpisode() at all.
+     * Without this, currentIndex (and therefore which episode gets reported
+     * to AniList/Jellyfin) silently goes stale after the first auto-advance.
+     *
+     * NOTE: SyncEngine already calls resetWatchedTracking() itself right after
+     * notifying this listener, so this method only needs to handle the
+     * panel-local state (currentIndex, currentLocalFile, the reportedThisEpisode
+     * guard, Jellyfin stop-reporting, UI labels) — not call syncEngine.resetWatchedTracking() again.
+     */
+    private void onPlaylistPositionChanged(int newIndex) {
+        if (newIndex < 0 || newIndex >= playlistEntries.size()) return;
+        if (newIndex == currentIndex) return; // already in sync, nothing to do
+
+        boolean isJellyfin = currentMode == SyncMode.JELLYFIN;
+
+        // Report stop for the episode mpv just left, same as handleNextEpisode() does.
+        if (isJellyfin && !jfEpisodeList.isEmpty()
+                && currentIndex < jfEpisodeList.size()
+                && jellyfinClient != null) {
+            final String itemId = jfEpisodeList.get(currentIndex).id();
+            new Thread(() -> jellyfinClient.reportPlaybackStopped(itemId, 0, 0),
+                    "jellyfin-auto-advance-stop").start();
+        }
+
+        log.info("mpv auto-advanced playlist: index " + currentIndex + " → " + newIndex);
+        currentIndex = newIndex;
+
+        if (!isJellyfin && currentIndex < playlistEntries.size())
+            currentLocalFile = playlistEntries.get(currentIndex);
+
+        reportedThisEpisode.set(false); // syncEngine already reset its own latch for this transition
+
+        Platform.runLater(() -> updatePlaylistLabels(isJellyfin));
+    }
+
+    private void resetWatchedTrackingForNewEpisode() {
+        reportedThisEpisode.set(false);
+        if (syncEngine != null) syncEngine.resetWatchedTracking();
     }
 
     // ── Jellyfin panel ────────────────────────────────────────────────────
@@ -201,8 +327,6 @@ public class MediaPanel {
         jellyfinPassField.setMaxWidth(Double.MAX_VALUE);
 
         jellyfinStatus.getStyleClass().addAll("subhead", "jellyfin-status-pending");
-        jellyfinStatus.setText("Not connected");
-
         jellyfinConnBtn.getStyleClass().add("accent");
         jellyfinConnBtn.setMaxWidth(Double.MAX_VALUE);
         jellyfinConnBtn.setOnAction(e -> handleJellyfinConnect());
@@ -223,8 +347,7 @@ public class MediaPanel {
         loginBox.getStyleClass().add("jellyfin-login");
 
         showsList.setPlaceholder(new Label("Connect to Jellyfin to browse"));
-        showsList.setPrefHeight(120);
-        showsList.setMinHeight(80);
+        showsList.setPrefHeight(120); showsList.setMinHeight(80);
         VBox.setVgrow(showsList, Priority.ALWAYS);
         showsList.setOnMouseClicked(e -> {
             JellyfinItem sel = showsList.getSelectionModel().getSelectedItem();
@@ -232,20 +355,17 @@ public class MediaPanel {
         });
 
         seasonsList.setPlaceholder(new Label("Select a show above"));
-        seasonsList.setPrefHeight(90);
-        seasonsList.setMinHeight(60);
+        seasonsList.setPrefHeight(90); seasonsList.setMinHeight(60);
         seasonsList.setOnMouseClicked(e -> {
             JellyfinItem sel = seasonsList.getSelectionModel().getSelectedItem();
             if (sel != null) loadEpisodes(sel.id());
         });
 
         episodesList.setPlaceholder(new Label("Select a season above"));
-        episodesList.setPrefHeight(120);
-        episodesList.setMinHeight(80);
+        episodesList.setPrefHeight(120); episodesList.setMinHeight(80);
         VBox.setVgrow(episodesList, Priority.ALWAYS);
 
-        if (!launchJfBtn.getStyleClass().contains("green"))
-            launchJfBtn.getStyleClass().add("green");
+        if (!launchJfBtn.getStyleClass().contains("green")) launchJfBtn.getStyleClass().add("green");
         launchJfBtn.setMaxWidth(Double.MAX_VALUE);
         launchJfBtn.setDisable(true);
         launchJfBtn.setOnAction(e -> handleJellyfinLaunch());
@@ -261,10 +381,9 @@ public class MediaPanel {
                 sectionLabel("Shows / Movies"), showsList,
                 sectionLabel("Seasons"),        seasonsList,
                 sectionLabel("Episodes"),       episodesList,
-                launchJfBtn,
-                nextJfBtn);
+                launchJfBtn, nextJfBtn);
         browserBox.setFillWidth(true);
-        VBox.setVgrow(showsList,    Priority.ALWAYS);
+        VBox.setVgrow(showsList, Priority.ALWAYS);
         VBox.setVgrow(episodesList, Priority.ALWAYS);
 
         VBox panel = new VBox(10, loginBox, browserBox);
@@ -283,19 +402,17 @@ public class MediaPanel {
                     new FileChooser.ExtensionFilter("Video Files",
                             "*.mp4","*.mkv","*.avi","*.mov","*.flv","*.wmv","*.m4v","*.ts","*.webm"),
                     new FileChooser.ExtensionFilter("All Files", "*.*"));
-            File file = fc.showOpenDialog(
-                    node.getScene() != null ? node.getScene().getWindow() : null);
+            File file = fc.showOpenDialog(node.getScene() != null ? node.getScene().getWindow() : null);
             if (file != null) {
                 savedLocalFilePath = file.getAbsolutePath();
                 localFileField.setText(savedLocalFilePath);
                 launchLocalBtn.setDisable(false);
-
-                List<String> playlist = buildLocalPlaylist(file);
-                int idx   = findIndex(playlist, file.getAbsolutePath());
-                int total = playlist.size();
-                playlistLabel.setText(total > 1
-                        ? "Found " + total + " episodes in folder — starting at #" + (idx + 1)
-                        : "Single file selected");
+                List<String> pl = buildLocalPlaylist(file);
+                int idx = findIndex(pl, file.getAbsolutePath());
+                int ep  = parseEpisodeNumber(file.getAbsolutePath());
+                playlistLabel.setText(pl.size() > 1
+                        ? "Found " + pl.size() + " files — ep " + ep + " selected"
+                        : "Single file — ep " + ep);
             }
         });
 
@@ -303,11 +420,7 @@ public class MediaPanel {
         localFileField.setMaxWidth(Double.MAX_VALUE);
         localFileField.setPromptText("Click Browse to pick a file…");
 
-        localMediaIdField.setPromptText("AniList media ID (optional)");
-        localMediaIdField.setMaxWidth(Double.MAX_VALUE);
-
-        if (!launchLocalBtn.getStyleClass().contains("green"))
-            launchLocalBtn.getStyleClass().add("green");
+        if (!launchLocalBtn.getStyleClass().contains("green")) launchLocalBtn.getStyleClass().add("green");
         launchLocalBtn.setMaxWidth(Double.MAX_VALUE);
         launchLocalBtn.setOnAction(e -> handleLocalLaunch());
 
@@ -329,20 +442,15 @@ public class MediaPanel {
         HBox.setHgrow(localFileField, Priority.ALWAYS);
         fileRow.setAlignment(Pos.CENTER_LEFT);
 
-        Label hint = new Label(
-                "Each user loads their own copy of the file.\n" +
-                        "All video files in the same folder are added as a playlist automatically.");
+        Label hint = new Label("All video files in the folder load as a playlist.\n"
+                + "Title and episode number are parsed from the filename automatically.");
         hint.setWrapText(true);
         hint.getStyleClass().add("subhead");
 
         VBox panel = new VBox(12,
                 sectionLabel("Select local media file"),
-                fileRow,
-                playlistLabel,
-                hint,
-                rowLabel("AniList Media ID", localMediaIdField),
-                launchLocalBtn,
-                nextLocalBtn);
+                fileRow, playlistLabel, hint,
+                launchLocalBtn, nextLocalBtn);
         panel.setFillWidth(true);
         panel.setAlignment(Pos.TOP_LEFT);
         return panel;
@@ -363,6 +471,7 @@ public class MediaPanel {
         }
         List<String> playlist = buildLocalPlaylist(file);
         int startIndex        = findIndex(playlist, file.getAbsolutePath());
+        currentLocalFile      = file.getAbsolutePath();
         launchPlaylist(playlist, startIndex, false);
     }
 
@@ -382,62 +491,141 @@ public class MediaPanel {
     }
 
     public void onMpvClosed(boolean success) {
-        // Cancel Jellyfin progress reporting
-        if (progressTask != null) {
-            progressTask.cancel(false);
-            progressTask = null;
-        }
+        if (progressTask != null) { progressTask.cancel(false); progressTask = null; }
 
-        launchLocalBtn.setText("▶  Launch in MPV");
-        launchLocalBtn.setDisable(false);
+        launchLocalBtn.setText("▶  Launch in MPV"); launchLocalBtn.setDisable(false);
         launchJfBtn.setText("▶  Launch in MPV");
         launchJfBtn.setDisable(episodesList.getSelectionModel().getSelectedItem() == null);
         nextLocalBtn.setDisable(true);
         nextJfBtn.setDisable(true);
 
-        // ── Jellyfin: report stop + update AniList via title search ──────
-        if (currentlyPlayingItem != null && jellyfinClient != null) {
-            final JellyfinItem item = currentlyPlayingItem;
-            currentlyPlayingItem = null;
-
-            new Thread(() -> {
-                jellyfinClient.reportPlaybackStopped(item.id(), 0, 0);
-
-                AniListClient aniList = owner.getTrackingPanel().getAniListClient();
-                if (aniList != null && aniList.hasToken()) {
-                    String searchTitle = (item.seriesName() != null && !item.seriesName().isBlank())
-                            ? item.seriesName()
-                            : item.name();
-                    int mediaId = aniList.searchMediaId(searchTitle);
-                    if (mediaId > 0) {
-                        aniList.updateProgress(mediaId, item.episodeNumber());
-                        log.info("AniList: updated '" + searchTitle
-                                + "' ep " + item.episodeNumber() + " mediaId=" + mediaId);
-                    } else {
-                        log.warning("AniList: could not find mediaId for '" + searchTitle + "'");
-                    }
-                }
-            }, "jellyfin-session-stop").start();
+        // Report Jellyfin playback-stopped — this is just Jellyfin's own
+        // "resume from here" bookkeeping, unrelated to the AniList update.
+        if (currentMode == SyncMode.JELLYFIN
+                && !jfEpisodeList.isEmpty()
+                && currentIndex < jfEpisodeList.size()
+                && jellyfinClient != null) {
+            final String itemId = jfEpisodeList.get(currentIndex).id();
+            new Thread(() -> jellyfinClient.reportPlaybackStopped(itemId, 0, 0),
+                    "jellyfin-session-stop").start();
         }
 
-        // ── Local: update AniList directly via manual media ID ────────────
-        if (currentlyPlayingItem == null && currentMode == SyncMode.LOCAL) {
-            AniListClient aniList = owner.getTrackingPanel().getAniListClient();
-            String mediaIdText = localMediaIdField.getText().trim();
-            if (aniList != null && aniList.hasToken() && !mediaIdText.isEmpty()) {
-                try {
-                    int mediaId  = Integer.parseInt(mediaIdText);
-                    int epNumber = currentIndex + 1; // 1-based
-                    new Thread(() ->
-                            aniList.updateProgress(mediaId, epNumber),
-                            "local-anilist-update").start();
-                    log.info("AniList local: updating mediaId=" + mediaId + " ep=" + epNumber);
-                } catch (NumberFormatException e) {
-                    log.warning("AniList local: invalid media ID '" + mediaIdText + "'");
-                }
-            }
-        }
+        // NOTE: AniList progress is reported solely by the 80%-watched threshold
+        // (see onWatchedThresholdReached()). Closing mpv before reaching 80% will
+        // NOT report progress to AniList — this is intentional: stopping early
+        // means the episode wasn't actually watched, so no update should be sent.
     }
+
+
+    /**
+     * Called by SyncEngine once playback crosses 80% of the current file's
+     * duration. This is the sole trigger for AniList progress updates — closing
+     * mpv no longer reports anything (see onMpvClosed()). Guarded against firing
+     * twice for the same episode via reportedThisEpisode.
+     */
+    private void onWatchedThresholdReached() {
+        if (!reportedThisEpisode.compareAndSet(false, true)) return; // already reported
+
+        Platform.runLater(() -> {
+            if (currentMode == SyncMode.JELLYFIN) {
+                reportJellyfinWatched();
+            } else if (currentMode == SyncMode.LOCAL) {
+                reportLocalWatched();
+            }
+        });
+    }
+
+    // ── AniList reporting (Jellyfin + local) ───────────────────────────────
+
+    /**
+     * Resolves the current Jellyfin episode to an AniList media ID + relative
+     * episode number via AniZip, then sends the progress update.
+     * Strategy:
+     *   1. Search AniList by series name + year → candidate media ID
+     *   2. Use AniZip to convert Jellyfin's TVDB season+ep → AniList relative ep
+     *   3. If AniZip lookup fails, fall back to Jellyfin's own episode number
+     */
+    private void reportJellyfinWatched() {
+        if (jfEpisodeList.isEmpty() || currentIndex >= jfEpisodeList.size()) return;
+        final JellyfinItem item = jfEpisodeList.get(currentIndex);
+
+        new Thread(() -> {
+            AniListClient aniList = owner.getTrackingPanel().getAniListClient();
+            if (aniList == null || !aniList.hasToken()) return;
+
+            String searchTitle = item.seriesName().isBlank() ? item.name() : item.seriesName();
+            int candidateId = aniList.searchMediaId(searchTitle, item.year());
+
+            if (candidateId <= 0) {
+                log.warning("AniList Jellyfin: no media found for '" + searchTitle + "' year=" + item.year());
+                return;
+            }
+
+            int tvdbSeason  = item.seasonNumber();  // ParentIndexNumber from Jellyfin
+            int tvdbEpisode = item.episodeNumber(); // IndexNumber from Jellyfin
+            int relativeEp  = aniZip.resolveJellyfinEpisode(candidateId, tvdbSeason, tvdbEpisode);
+
+            if (relativeEp <= 0) {
+                // Do NOT fall back to the raw TVDB episode number here — TVDB
+                // and AniList often use different numbering schemes (TVDB may
+                // run absolute-within-season across multiple AniList entries),
+                // so a raw passthrough is frequently wrong, not just imprecise.
+                // Sending a wrong progress value is worse than sending none —
+                // skip this update and let the user fix it manually on AniList
+                // if it matters, rather than silently corrupting their progress.
+                log.warning("AniZip: could not resolve TVDB S" + tvdbSeason + "E" + tvdbEpisode
+                        + " for anilistId=" + candidateId
+                        + " — skipping AniList update (no safe fallback)");
+                return;
+            }
+
+            aniList.updateProgress(candidateId, relativeEp);
+            log.info("AniList Jellyfin: mediaId=" + candidateId
+                    + " tvdbS" + tvdbSeason + "E" + tvdbEpisode
+                    + " → AniList ep " + relativeEp);
+
+        }, "jellyfin-anilist-report").start();
+    }
+
+    /**
+     * Parses the currently-playing local file's title + episode number,
+     * resolves it against AniList via search, normalizes the episode number
+     * through AniZip (handles split-cour absolute numbering), then sends
+     * the progress update.
+     */
+    private void reportLocalWatched() {
+        if (currentLocalFile.isEmpty()) return;
+        final String fileForThisRun = currentLocalFile; // snapshot — avoid races with playlist advancing
+
+        AniListClient aniList = owner.getTrackingPanel().getAniListClient();
+        if (aniList == null || !aniList.hasToken()) return;
+
+        new Thread(() -> {
+            String parsedTitle = parseSeriesTitle(fileForThisRun);
+            int parsedEp = parseEpisodeNumber(fileForThisRun);
+
+            if (parsedTitle.isEmpty()) {
+                log.warning("AniList local: could not parse a title from " + fileForThisRun);
+                return;
+            }
+
+            int mediaId = aniList.searchMediaId(parsedTitle);
+            if (mediaId <= 0) {
+                log.warning("AniList local: no AniList match for '" + parsedTitle + "'");
+                return;
+            }
+
+            int finalEp = aniZip.resolveAbsoluteEpisode(mediaId, parsedEp, 0);
+
+            log.info("AniList local: '" + parsedTitle + "' mediaId=" + mediaId
+                    + " parsedEp=" + parsedEp + " finalEp=" + finalEp
+                    + " file=" + fileForThisRun);
+
+            aniList.updateProgress(mediaId, finalEp);
+        }, "local-anilist-report").start();
+    }
+
+    // ── Jellyfin connect / launch ─────────────────────────────────────────
 
     private void handleJellyfinConnect() {
         String url  = jellyfinUrlField.getText().trim();
@@ -466,8 +654,7 @@ public class MediaPanel {
                 Platform.runLater(() -> {
                     showsList.getItems().setAll(shows);
                     showsList.getItems().addAll(movies);
-                    setJellyfinStatus("✓ Connected — "
-                            + (shows.size() + movies.size()) + " items", "ok");
+                    setJellyfinStatus("✓ Connected — " + (shows.size() + movies.size()) + " items", "ok");
                     jellyfinConnBtn.setText("Connected ✓");
                 });
             } else {
@@ -507,26 +694,28 @@ public class MediaPanel {
         JellyfinItem selected = episodesList.getSelectionModel().getSelectedItem();
         if (selected == null || jellyfinClient == null) return;
 
-        currentlyPlayingItem = selected;
-
-        List<JellyfinItem> allEpisodes = new ArrayList<>(episodesList.getItems());
-        List<String> urls = allEpisodes.stream()
+        // Store full episode list — currentIndex tracks which ep is playing
+        // as MPV advances through the playlist via playlist-next
+        jfEpisodeList = new ArrayList<>(episodesList.getItems());
+        List<String> urls = jfEpisodeList.stream()
                 .map(ep -> jellyfinClient.getStreamUrl(ep.id()))
                 .collect(Collectors.toList());
-        int startIndex = allEpisodes.indexOf(selected);
+        int startIndex = jfEpisodeList.indexOf(selected);
 
         launchPlaylist(urls, startIndex, true);
 
-        // Report start + start periodic progress reporting
+        // Report playback start + start periodic progress ticks
+        final JellyfinItem startItem = selected;
         new Thread(() -> {
-            jellyfinClient.reportPlaybackStart(selected.id(), 0, true);
+            jellyfinClient.reportPlaybackStart(startItem.id(), 0, true);
             jellyfinClient.registerCapabilities();
 
-            // Schedule progress updates every 10s to keep session alive
             progressTask = progressScheduler.scheduleAtFixedRate(() -> {
-                if (jellyfinClient != null && currentlyPlayingItem != null) {
+                if (jellyfinClient != null
+                        && !jfEpisodeList.isEmpty()
+                        && currentIndex < jfEpisodeList.size()) {
                     jellyfinClient.reportPlaybackProgress(
-                            currentlyPlayingItem.id(), 0, false);
+                            jfEpisodeList.get(currentIndex).id(), 0, false);
                 }
             }, 10, 10, TimeUnit.SECONDS);
 

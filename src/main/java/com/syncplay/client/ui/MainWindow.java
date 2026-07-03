@@ -50,10 +50,23 @@ public class MainWindow {
         offsetPanel      = new OffsetPanel();
         trackingPanel    = new TrackingPanel(this);
 
-        offsetPanel.setSyncEngine(syncEngine);
+        wireSyncEngine();
 
         buildLayout();
         wireShutdown();
+    }
+
+    /**
+     * Wires every panel that depends on the current SyncEngine instance.
+     * MUST be called both here (constructor) and in onConnect() — onConnect()
+     * replaces syncEngine with a fresh instance (it needs the freshly-connected
+     * ServerConnection), and the old instance's listeners would otherwise be
+     * silently abandoned, breaking AniList's 80%-watched trigger and episode
+     * tracking with no error or log output at all.
+     */
+    private void wireSyncEngine() {
+        offsetPanel.setSyncEngine(syncEngine);
+        mediaPanel.setSyncEngine(syncEngine);
     }
 
     private void buildLayout() {
@@ -103,7 +116,7 @@ public class MainWindow {
 
         syncEngine = new SyncEngine(mpv, server);
         syncEngine.setOffset(savedOffset);
-        offsetPanel.setSyncEngine(syncEngine);
+        wireSyncEngine();
 
         server.addMessageHandler(msg ->
                 Platform.runLater(() -> chatPanel.appendMessage(msg)));
