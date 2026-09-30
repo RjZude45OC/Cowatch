@@ -93,6 +93,10 @@ public class MainWindow {
     private void wireSyncEngine() {
         offsetPanel.setSyncEngine(syncEngine);
         mediaPanel.setSyncEngine(syncEngine);
+        // Only meaningful when attached to a player cowatch did not launch, but
+        // harmless otherwise - the panel ignores it unless Seanime is connected.
+        syncEngine.setMediaPathListener(path ->
+                Platform.runLater(() -> mediaPanel.onSeanimeMediaPath(path)));
     }
 
     // --- Layout -----------------------------------------------------------
@@ -275,6 +279,57 @@ public class MainWindow {
                 Platform.runLater(this::onMpvClosed);
             }
         });
+    }
+
+    // --- Seanime attach ---------------------------------------------------
+
+    /**
+     * Joins the mpv window Seanime opened instead of launching a player.
+     *
+     * <p>Runs off the FX thread because the connect blocks, then waits on the IPC
+     * connection the same way {@link #launch} waits on a process, so closing that
+     * player resets this UI too. Nothing here starts or stops mpv: the viewer owns
+     * it through Seanime, and cowatch is a second IPC client on the same socket.
+     */
+    public void onAttachToSeanime(String socketPath) {
+        Async.run("seanime-attach", () -> {
+            String error = mpv.attach(socketPath);
+            Platform.runLater(() -> {
+                boolean ok = (error == null);
+                mediaPanel.onSeanimeAttached(ok);
+                if (ok) {
+                    playbackControls.setEnabled(true);
+                    systemMessage("Attached to the mpv window Seanime opened");
+                } else {
+                    showError("Could not attach to Seanime playback", error);
+                }
+            });
+            if (error != null) return;
+
+            try {
+                mpv.waitForExit();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            Platform.runLater(() -> {
+                playbackControls.setEnabled(false);
+                systemMessage("Seanime's mpv window closed");
+                mediaPanel.onSeanimeAttached(false);
+            });
+        });
+    }
+
+    /**
+     * Tells the room which episode this client has started.
+     *
+     * <p>Carries an AniList id rather than a path or a Jellyfin item id, so a
+     * viewer streaming from Jellyfin and one playing a Seanime download can be
+     * talking about the same episode.
+     */
+    public void announceMedia(int anilistId, int episode, String title, String source) {
+        if (!server.isConnected()) return;
+        server.sendMedia(anilistId, episode, title, source);
     }
 
     // --- Next episode (IPC only) ------------------------------------------

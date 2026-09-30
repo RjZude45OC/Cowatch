@@ -37,8 +37,28 @@ public class MPVController {
     private static final int    CONNECT_TIMEOUT_MS = 5_000;
     private static final int    CONNECT_POLL_MS    = 200;
 
+    /** Line break for multi-line messages shown in a dialog. */
+    private static final String NL = System.lineSeparator();
+
     private Process      mpvProcess;
     private WinNT.HANDLE pipeHandle;
+
+    /**
+     * True when this controller is driving an mpv it did not start - the one
+     * Seanime launched, for instance.
+     *
+     * <p>mpv's IPC socket accepts several clients at once, so cowatch can sit
+     * alongside whatever launched the player and both read and write it. What it
+     * must not do in that state is take ownership: no killing the process it does
+     * not own, and no deleting the socket file another program is listening on.
+     */
+    private volatile boolean attached = false;
+
+    /** Liveness for the attached case, where there is no Process to poll. */
+    private volatile boolean connectionAlive = false;
+
+    /** Released when the reader thread sees the IPC stream end. */
+    private volatile CountDownLatch connectionClosed = new CountDownLatch(1);
 
     private OutputStream  writeStream;
     private SocketChannel unixChannel;
@@ -194,6 +214,7 @@ public class MPVController {
             drainer.start();
 
             boolean connected = waitForSocketAndConnect();
+            if (connected) connectionAlive = true;
             if (!connected) return "MPV launched but IPC socket connection timed out.\n"
                     + "The file may be invalid or MPV crashed on startup.";
             return null;
@@ -205,6 +226,61 @@ public class MPVController {
             log.severe("Unexpected error launching MPV: " + e.getMessage());
             return "Unexpected error: " + e.getMessage();
         }
+    }
+
+    /**
+     * Attaches to an mpv that something else already started, over its existing
+     * IPC socket, without launching a player of its own.
+     *
+     * <p>This is how cowatch joins playback a viewer began in Seanime: Seanime
+     * runs mpv with {@code --input-ipc-server}, mpv accepts more than one IPC
+     * client at a time, and so cowatch can both observe that player and drive
+     * it. Sync therefore works in both directions - the room sees his pause, and
+     * a pause from the room reaches his player.
+     *
+     * <p>The socket name has to be known in advance. Seanime generates a fresh
+     * one per launch (pid_timestamp_counter) unless a fixed name is set under its
+     * Settings, Media Player, mpv socket - which is the value
+     * {@link com.cowatch.client.seanime.SeanimeClient#getMpvSocket()} reads back.
+     *
+     * @param socketPath the IPC socket or Windows named pipe mpv is listening on
+     * @return null on success, or a human-readable reason it failed
+     */
+    public String attach(String socketPath) {
+        if (socketPath == null || socketPath.isBlank()) {
+            return "No mpv socket configured." + NL + NL
+                 + "In Seanime, open Settings then Media Player and set a fixed "
+                 + "mpv socket name, then reconnect. Without one, Seanime picks a new "
+                 + "socket name for every playback and cowatch cannot find it.";
+        }
+        reset();
+
+        String path = socketPath.trim();
+        // mpv accepts a bare name on Windows and prepends the pipe namespace
+        // itself, so a value copied straight out of Seanime's settings may be
+        // missing the prefix CreateFileW needs.
+        if (isWindows() && !path.startsWith("\\\\")) {
+            path = "\\\\.\\pipe\\" + path.replace('/', '\\');
+        }
+        currentSocketPath = path;
+        attached = true;
+
+        if (!isWindows() && !new File(path).exists()) {
+            attached = false;
+            return "No mpv IPC socket at " + path + "." + NL + NL
+                 + "Start playback in Seanime first - the socket only exists while "
+                 + "its player is running.";
+        }
+
+        if (!connectIPC()) {
+            attached = false;
+            return "Found no mpv listening on " + path + "." + NL + NL
+                 + "Start playback in Seanime first, and check the socket name matches "
+                 + "the one in its Media Player settings.";
+        }
+        connectionAlive = true;
+        log.info("Attached to existing mpv at " + path);
+        return null;
     }
 
     /**
@@ -338,11 +414,17 @@ public class MPVController {
                 log.warning("MPV reader: stream ended");
             } catch (IOException e) {
                 log.warning("MPV reader died: " + e.getMessage());
+            } finally {
+                // The only exit signal available when attached: mpv closing its
+                // end of the socket.
+                connectionAlive = false;
+                connectionClosed.countDown();
             }
         });
     }
 
     public void waitForExit() throws InterruptedException {
+        if (attached) { connectionClosed.await(); return; }
         if (mpvProcess != null) mpvProcess.waitFor();
     }
 
@@ -355,6 +437,11 @@ public class MPVController {
         // Track playlist position so UI can show "next episode" state
         sendRaw("{\"command\":[\"observe_property\",4,\"playlist-pos\"]}");
         sendRaw("{\"command\":[\"observe_property\",5,\"playlist-count\"]}");
+        // What is actually loaded. Only cowatch-launched playback knows this
+        // from its own playlist; when attached to someone else's mpv it is the
+        // only way to find out what is on screen.
+        sendRaw("{\"command\":[\"observe_property\",6,\"path\"]}");
+        sendRaw("{\"command\":[\"observe_property\",7,\"media-title\"]}");
     }
 
     // ── PLAYBACK CONTROLS ────────────────────────────────────────
@@ -419,7 +506,19 @@ public class MPVController {
     // ── STATE ─────────────────────────────────────────────────────
 
     public void setEventListener(Consumer<String> l) { this.eventListener = l; }
-    public boolean isRunning() { return mpvProcess != null && mpvProcess.isAlive(); }
+    /**
+     * True while there is a player to control.
+     *
+     * <p>An attached player has no Process to poll, so its liveness is the state
+     * of the IPC connection instead.
+     */
+    public boolean isRunning() {
+        if (attached) return connectionAlive;
+        return mpvProcess != null && mpvProcess.isAlive();
+    }
+
+    /** True when driving an mpv started by something else. */
+    public boolean isAttached() { return attached; }
 
     // ── RESET + SHUTDOWN ─────────────────────────────────────────
 
@@ -449,9 +548,15 @@ public class MPVController {
             tempPlaylistFile = null;
         }
 
-        if (!isWindows()) {
+        // Only clean up a socket this controller created. Deleting the one
+        // Seanime's mpv is listening on would break that player.
+        if (!isWindows() && !attached) {
             try { Files.deleteIfExists(Path.of(currentSocketPath)); } catch (Exception ignored) {}
         }
+        attached        = false;
+        connectionAlive = false;
+        connectionClosed.countDown();   // release anyone waiting in waitForExit()
+        connectionClosed = new CountDownLatch(1);
         if (mpvProcess != null) {
             mpvProcess.destroy();
             try { mpvProcess.waitFor(2, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}

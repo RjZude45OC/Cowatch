@@ -89,6 +89,7 @@ public class ChatPanel {
                 case "play"            -> "▶ " + from + " pressed play at "  + formatPos(obj.optDouble("position", 0));
                 case "pause"           -> "⏸ " + from + " paused at "        + formatPos(obj.optDouble("position", 0));
                 case "seek"            -> "⏩ " + from + " seeked to "        + formatPos(obj.optDouble("position", 0));
+                case "media"           -> formatMedia(obj, from);
                 case "system","joined" -> "• " + data;
                 case "error"           -> "⚠ " + data;
                 default                -> rawJson;
@@ -97,6 +98,27 @@ public class ChatPanel {
         } catch (Exception e) {
             appendRaw(rawJson);
         }
+    }
+
+    /**
+     * Renders a peer's "now playing" announcement.
+     *
+     * <p>Shows the AniList id alongside the title because that is the handle the
+     * viewer needs to find the same episode in their own library - the peer's
+     * filename may be nothing like theirs.
+     */
+    private String formatMedia(JSONObject obj, String from) {
+        int    anilistId = obj.optInt("anilistId", 0);
+        int    episode   = obj.optInt("episode", 0);
+        String title     = obj.optString("title", "");
+        String source    = obj.optString("source", "");
+
+        StringBuilder sb = new StringBuilder("▶ ").append(from).append(" started ");
+        sb.append(title.isBlank() ? "AniList id " + anilistId : title);
+        if (episode > 0) sb.append(" · episode ").append(episode);
+        if (!title.isBlank() && anilistId > 0) sb.append(" (AniList id ").append(anilistId).append(")");
+        if (!source.isBlank()) sb.append(" from ").append(source);
+        return sb.toString();
     }
 
     private String formatPos(double seconds) {
