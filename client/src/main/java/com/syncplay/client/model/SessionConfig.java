@@ -1,4 +1,4 @@
-package com.syncplay.client.model;
+package com.cowatch.client.model;
 
 /**
  * Immutable snapshot of everything needed to start a sync session.

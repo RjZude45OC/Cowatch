@@ -1,6 +1,6 @@
-package com.syncplay.client.ui.controllers;
+package com.cowatch.client.ui.controllers;
 
-import com.syncplay.client.network.ServerConnection;
+import com.cowatch.client.network.ServerConnection;
 
 import javafx.geometry.*;
 import javafx.scene.control.*;

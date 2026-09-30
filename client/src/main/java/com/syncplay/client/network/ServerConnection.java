@@ -1,4 +1,4 @@
-package com.syncplay.client.network;
+package com.cowatch.client.network;
 
 import java.io.*;
 import java.net.*;
@@ -6,7 +6,7 @@ import java.util.function.Consumer;
 import java.util.logging.*;
 
 /**
- * Manages the TCP connection to the SyncPlay relay server.
+ * Manages the TCP connection to the cowatch relay server.
  * Sends sync events and receives events from other users in the room.
  */
 public class ServerConnection {

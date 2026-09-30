@@ -1,4 +1,4 @@
-package com.syncplay.client.ui;
+package com.cowatch.client.ui;
 
 import javafx.application.Application;
 import javafx.scene.Scene;
@@ -6,12 +6,12 @@ import javafx.stage.Stage;
 
 /**
  * JavaFX entry point.
- * Launches the main SyncPlay window.
+ * Launches the main cowatch window.
  */
-public class SyncPlayApp extends Application {
+public class cowatchApp extends Application {
 
     public static final String CSS_PATH =
-        "/com/syncplay/client/css/dark.css";
+        "/com/cowatch/client/css/dark.css";
 
     @Override
     public void start(Stage stage) {
@@ -19,7 +19,7 @@ public class SyncPlayApp extends Application {
         Scene scene = new Scene(window.getRoot(), 900, 680);
         scene.getStylesheets().add(getClass().getResource(CSS_PATH).toExternalForm());
 
-        stage.setTitle("SyncPlay");
+        stage.setTitle("cowatch");
         stage.setScene(scene);
         stage.setMinWidth(800);
         stage.setMinHeight(600);

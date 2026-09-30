@@ -1,8 +1,8 @@
-package com.syncplay.client.ui;
+package com.cowatch.client.ui;
 
-import com.syncplay.client.mpv.MPVController;
-import com.syncplay.client.network.ServerConnection;
-import com.syncplay.client.sync.SyncEngine;
+import com.cowatch.client.mpv.MPVController;
+import com.cowatch.client.network.ServerConnection;
+import com.cowatch.client.sync.SyncEngine;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -11,7 +11,7 @@ import java.awt.event.*;
 import java.io.File;
 
 /**
- * Main SyncPlay client UI (Swing — works on Windows, Mac, Linux without JavaFX).
+ * Main cowatch client UI (Swing — works on Windows, Mac, Linux without JavaFX).
  *
  * Layout:
  *   ┌─────────────────────────────────────┐
@@ -25,7 +25,7 @@ import java.io.File;
  *   │  [chat input]           [  Send  ]  │
  *   └─────────────────────────────────────┘
  */
-public class SyncPlayUI extends JFrame {
+public class cowatchUI extends JFrame {
 
     private final MPVController    mpv    = new MPVController();
     private final ServerConnection server = new ServerConnection();
@@ -55,8 +55,8 @@ public class SyncPlayUI extends JFrame {
     private final JTextField chatInput     = new JTextField(30);
     private final JButton    sendBtn       = new JButton("Send");
 
-    public SyncPlayUI() {
-        super("SyncPlay");
+    public cowatchUI() {
+        super("cowatch");
         buildUI();
         wireActions();
         setDefaultCloseOperation(EXIT_ON_CLOSE);
@@ -296,7 +296,7 @@ public class SyncPlayUI extends JFrame {
             try {
                 UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
             } catch (Exception ignored) {}
-            new SyncPlayUI();
+            new cowatchUI();
         });
     }
 }

@@ -1,4 +1,4 @@
-package com.syncplay.client.jellyfin;
+package com.cowatch.client.jellyfin;
 
 /** A single item returned from the Jellyfin library. */
 public record JellyfinItem(

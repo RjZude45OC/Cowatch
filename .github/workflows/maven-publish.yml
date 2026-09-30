@@ -32,9 +32,9 @@ jobs:
         run: |
           jpackage `
             --input target `
-            --main-jar syncplay-client-1.0.0.jar `
-            --main-class com.syncplay.client.Launcher `
-            --name SyncPlay `
+            --main-jar cowatch-client-1.0.0.jar `
+            --main-class com.cowatch.client.Launcher `
+            --name cowatch `
             --app-version 1.0 `
             --win-dir-chooser `
             --win-shortcut `
@@ -48,9 +48,9 @@ jobs:
         run: |
           jpackage \
             --input target \
-            --main-jar syncplay-client-1.0.0.jar \
-            --main-class com.syncplay.client.Launcher \
-            --name SyncPlay \
+            --main-jar cowatch-client-1.0.0.jar \
+            --main-class com.cowatch.client.Launcher \
+            --name cowatch \
             --app-version 1.0 \
             --type deb \
             --dest dist
@@ -62,9 +62,9 @@ jobs:
         run: |
           jpackage \
             --input target \
-            --main-jar syncplay-client-1.0.0.jar \
-            --main-class com.syncplay.client.Launcher \
-            --name SyncPlay \
+            --main-jar cowatch-client-1.0.0.jar \
+            --main-class com.cowatch.client.Launcher \
+            --name cowatch \
             --app-version 1.0 \
             --type dmg \
             --dest dist

@@ -1,4 +1,4 @@
-package com.syncplay.client.model;
+package com.cowatch.client.model;
 
 /**
  * The three supported sync modes.
@@ -11,13 +11,13 @@ public enum SyncMode {
 
     LOCAL_TO_LOCAL(
         "Local ↔ Local",
-        "Both users play a local copy of the same file.\nSync signals are relayed via the SyncPlay server.",
+        "Both users play a local copy of the same file.\nSync signals are relayed via the cowatch server.",
         "🖥"
     ),
 
     LOCAL_TO_JELLYFIN(
         "Local ↔ Jellyfin",
-        "One user plays a local file, the other streams from Jellyfin.\nBoth sides sync via the SyncPlay server.",
+        "One user plays a local file, the other streams from Jellyfin.\nBoth sides sync via the cowatch server.",
         "🔀"
     ),
 

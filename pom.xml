@@ -5,8 +5,8 @@
          http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.syncplay</groupId>
-    <artifactId>syncplay-client</artifactId>
+    <groupId>com.cowatch</groupId>
+    <artifactId>cowatch-client</artifactId>
     <version>1.0.0</version>
     <packaging>jar</packaging>
 
@@ -43,6 +43,11 @@
             <version>5.14.0</version>
         </dependency>
 
+        <dependency>
+            <groupId>com.dgtlrepublic</groupId>
+            <artifactId>anitomyJ</artifactId>
+            <version>0.0.7</version>
+        </dependency>
     </dependencies>
 
     <build>
@@ -53,7 +58,7 @@
                 <artifactId>javafx-maven-plugin</artifactId>
                 <version>0.0.8</version>
                 <configuration>
-                    <mainClass>com.syncplay.client.Launcher</mainClass>
+                    <mainClass>com.cowatch.client.Launcher</mainClass>
                 </configuration>
             </plugin>
 
@@ -71,7 +76,7 @@
                             <shadedArtifactAttached>false</shadedArtifactAttached>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>com.syncplay.client.Launcher</mainClass>
+                                    <mainClass>com.cowatch.client.Launcher</mainClass>
                                 </transformer>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                             </transformers>

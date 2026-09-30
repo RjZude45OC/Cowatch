@@ -1,8 +1,8 @@
-package com.syncplay.client.ui.controllers;
+package com.cowatch.client.ui.controllers;
 
-import com.syncplay.client.jellyfin.*;
-import com.syncplay.client.model.SyncMode;
-import com.syncplay.client.ui.MainWindow;
+import com.cowatch.client.jellyfin.*;
+import com.cowatch.client.model.SyncMode;
+import com.cowatch.client.ui.MainWindow;
 
 import javafx.application.Platform;
 import javafx.geometry.*;

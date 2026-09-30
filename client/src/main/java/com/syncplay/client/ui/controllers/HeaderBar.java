@@ -1,4 +1,4 @@
-package com.syncplay.client.ui.controllers;
+package com.cowatch.client.ui.controllers;
 
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -15,7 +15,7 @@ public class HeaderBar {
     private final Label  roomLabel   = new Label("");
 
     public HeaderBar() {
-        Label logo = new Label("▶  SyncPlay");
+        Label logo = new Label("▶  cowatch");
         logo.setStyle("-fx-font-size: 18px; -fx-font-weight: bold; -fx-text-fill: #7c6af7;");
 
         statusDot.getStyleClass().addAll("status-dot", "disconnected");

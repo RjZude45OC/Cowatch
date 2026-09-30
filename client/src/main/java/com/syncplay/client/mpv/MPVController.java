@@ -1,4 +1,4 @@
-package com.syncplay.client.mpv;
+package com.cowatch.client.mpv;
 
 import java.io.*;
 import java.net.StandardProtocolFamily;

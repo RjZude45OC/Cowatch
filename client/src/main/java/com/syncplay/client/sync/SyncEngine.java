@@ -1,7 +1,7 @@
-package com.syncplay.client.sync;
+package com.cowatch.client.sync;
 
-import com.syncplay.client.mpv.MPVController;
-import com.syncplay.client.network.ServerConnection;
+import com.cowatch.client.mpv.MPVController;
+import com.cowatch.client.network.ServerConnection;
 import org.json.*;
 import java.util.concurrent.atomic.*;
 import java.util.logging.*;

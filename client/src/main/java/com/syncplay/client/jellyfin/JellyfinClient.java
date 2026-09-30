@@ -1,4 +1,4 @@
-package com.syncplay.client.jellyfin;
+package com.cowatch.client.jellyfin;
 
 import org.json.*;
 import java.net.*;
@@ -42,8 +42,8 @@ public class JellyfinClient {
                 .uri(URI.create(baseUrl + "/Users/AuthenticateByName"))
                 .header("Content-Type",  "application/json")
                 .header("X-Emby-Authorization",
-                    "MediaBrowser Client=\"SyncPlay\", Device=\"PC\", " +
-                    "DeviceId=\"syncplay-java\", Version=\"1.0\"")
+                    "MediaBrowser Client=\"cowatch\", Device=\"PC\", " +
+                    "DeviceId=\"cowatch-java\", Version=\"1.0\"")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
 

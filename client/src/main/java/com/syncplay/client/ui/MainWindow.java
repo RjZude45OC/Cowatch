@@ -1,10 +1,10 @@
-package com.syncplay.client.ui;
+package com.cowatch.client.ui;
 
-import com.syncplay.client.model.*;
-import com.syncplay.client.mpv.MPVController;
-import com.syncplay.client.network.ServerConnection;
-import com.syncplay.client.sync.SyncEngine;
-import com.syncplay.client.ui.controllers.*;
+import com.cowatch.client.model.*;
+import com.cowatch.client.mpv.MPVController;
+import com.cowatch.client.network.ServerConnection;
+import com.cowatch.client.sync.SyncEngine;
+import com.cowatch.client.ui.controllers.*;
 
 import javafx.application.Platform;
 import javafx.geometry.Insets;
@@ -145,7 +145,7 @@ public class MainWindow {
     public void showError(String msg) {
         Platform.runLater(() -> {
             Alert alert = new Alert(Alert.AlertType.ERROR, msg, ButtonType.OK);
-            alert.setTitle("SyncPlay Error");
+            alert.setTitle("cowatch Error");
             alert.initOwner(stage);
             alert.show();
         });

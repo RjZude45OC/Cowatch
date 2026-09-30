@@ -5,8 +5,8 @@
          http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.syncplay</groupId>
-    <artifactId>syncplay-client</artifactId>
+    <groupId>com.cowatch</groupId>
+    <artifactId>cowatch-client</artifactId>
     <version>1.0.0</version>
     <packaging>jar</packaging>
 
@@ -45,7 +45,7 @@
                 <artifactId>javafx-maven-plugin</artifactId>
                 <version>0.0.8</version>
                 <configuration>
-                    <mainClass>com.syncplay.client.ui.SyncPlayApp</mainClass>
+                    <mainClass>com.cowatch.client.ui.cowatchApp</mainClass>
                 </configuration>
             </plugin>
 
@@ -59,11 +59,11 @@
                         <phase>package</phase>
                         <goals><goal>shade</goal></goals>
                         <configuration>
-                            <finalName>syncplay-client</finalName>
+                            <finalName>cowatch-client</finalName>
                             <transformers>
                                 <transformer implementation=
                                     "org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>com.syncplay.client.ui.SyncPlayApp</mainClass>
+                                    <mainClass>com.cowatch.client.ui.cowatchApp</mainClass>
                                 </transformer>
                             </transformers>
                             <filters>
