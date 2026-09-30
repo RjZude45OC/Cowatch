@@ -95,12 +95,10 @@
     -fx-font-size: 12px;
 }
 
-/* Left scroll pane — transparent, no inner border */
-.left-scroll,
-.left-scroll > .viewport,
-.left-scroll > .scroll-bar,
+/* Scroll panes — transparent, no inner border */
 .scroll-pane,
-.scroll-pane > .viewport {
+.scroll-pane > .viewport,
+.scroll-pane > .scroll-bar {
     -fx-background-color: transparent;
     -fx-background: transparent;
 }
@@ -636,28 +634,6 @@
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
-   LEFT COLUMN COMPACT  — smaller card padding to fit without scrolling
-   ════════════════════════════════════════════════════════════════════════════ */
-
-.left-scroll .card {
-    -fx-padding: 10px;
-    -fx-effect: none;
-}
-.left-scroll .mode-btn {
-    -fx-padding: 7px 6px;
-    -fx-font-size: 11.5px;
-}
-.left-scroll .button {
-    -fx-padding: 6px 12px;
-}
-.left-scroll .text-field,
-.left-scroll .password-field {
-    -fx-padding: 5px 8px;
-}
-.left-scroll .titled-pane > .title {
-    -fx-padding: 6px 8px;
-}
-/* ════════════════════════════════════════════════════════════════════════════
    HEADER DISCONNECT BUTTON
    Uses the shared red tokens and the same 7px radius as every other button,
    so it reads as part of the set rather than a stray square in the header.
@@ -682,3 +658,111 @@
 .disconnect-btn:pressed {
     -fx-background-color: derive(-sp-red-dim, -10%);
 }
+/* ═════════════════════════════════════════════════════════════════════════════
+   HEADER ICON BUTTONS  — gear, chat toggle, transport overflow
+   Square, quiet by default; the chat toggle also carries an active state and
+   an unread dot, since hiding chat by default would otherwise lose activity.
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+.icon-btn {
+    -fx-background-color:  transparent;
+    -fx-border-color:      transparent;
+    -fx-text-fill:         -sp-text-dim;
+    -fx-font-size:         14px;
+    -fx-min-width:         30px;
+    -fx-min-height:        28px;
+    -fx-padding:           3px 7px;
+    -fx-background-radius: 7px;
+    -fx-border-radius:     7px;
+    -fx-cursor:            hand;
+}
+.icon-btn:hover {
+    -fx-background-color: -sp-surface2;
+    -fx-border-color:     transparent;
+    -fx-text-fill:        -sp-text;
+}
+.icon-btn:pressed { -fx-background-color: -sp-surface3; }
+
+.icon-btn-active {
+    -fx-background-color: -sp-accent-dim;
+    -fx-text-fill:        -sp-accent;
+}
+
+/* The unread marker is the border, not an extra node — one style class flip
+   rather than a badge to position and keep in sync. */
+.icon-btn-unread {
+    -fx-border-color: -sp-accent;
+    -fx-border-width: 1px;
+    -fx-text-fill:    -sp-text;
+}
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   TRANSPORT BAR  — bottom row, present only while mpv runs
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+.transport-bar {
+    -fx-background-color: -sp-surface;
+    -fx-border-color:     -sp-border;
+    -fx-border-width:     1px 0 0 0;
+}
+
+.transport-btn {
+    -fx-background-color:  -sp-surface2;
+    -fx-border-color:      -sp-border;
+    -fx-border-width:      1px;
+    -fx-border-radius:     7px;
+    -fx-background-radius: 7px;
+    -fx-text-fill:         -sp-text;
+    -fx-font-size:         12.5px;
+    -fx-min-width:         44px;
+    -fx-padding:           5px 9px;
+    -fx-cursor:            hand;
+}
+.transport-btn:hover    { -fx-background-color: -sp-surface3; -fx-border-color: -sp-accent; }
+.transport-btn:pressed  { -fx-background-color: -sp-elevated; }
+.transport-btn:disabled { -fx-opacity: 0.38; -fx-cursor: default; }
+
+/* Play and pause keep the semantic fills from the old control card. */
+.transport-btn.green    { -fx-background-color: -sp-green-dim; -fx-border-color: -sp-green; -fx-text-fill: -sp-green; }
+.transport-btn.green:hover  { -fx-background-color: derive(-sp-green-dim, 18%); }
+.transport-btn.red      { -fx-background-color: -sp-red-dim;   -fx-border-color: -sp-red;   -fx-text-fill: -sp-red; }
+.transport-btn.red:hover    { -fx-background-color: derive(-sp-red-dim, 18%); }
+
+/* Overflow MenuButton: same quiet square as the header icons, minus the arrow
+   — the glyph already reads as "more". */
+.overflow-btn {
+    -fx-background-color:  transparent;
+    -fx-border-color:      transparent;
+    -fx-text-fill:         -sp-text-dim;
+    -fx-font-size:         15px;
+    -fx-padding:           2px 6px;
+    -fx-background-radius: 7px;
+    -fx-cursor:            hand;
+}
+.overflow-btn:hover                { -fx-background-color: -sp-surface2; -fx-text-fill: -sp-text; }
+.overflow-btn > .arrow-button      { -fx-padding: 0; }
+.overflow-btn > .arrow-button > .arrow { -fx-shape: " "; -fx-padding: 0; }
+.overflow-btn .label               { -fx-text-fill: -sp-text-dim; }
+.overflow-btn:hover .label         { -fx-text-fill: -sp-text; }
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   SETTINGS WINDOW
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+.settings-root { -fx-background-color: -sp-bg; }
+.settings-root .tab-pane .tab-header-area { -fx-padding: 4px 4px 0 4px; }
+
+/* Hyperlinks are used only as disclosure toggles, so they should read as quiet
+   text rather than as web links. */
+.hyperlink {
+    -fx-text-fill:   -sp-accent;
+    -fx-border-color: transparent;
+    -fx-padding:     1px 0;
+    -fx-underline:   false;
+}
+.hyperlink:hover   { -fx-underline: true; }
+.hyperlink:focused { -fx-border-color: transparent; }
+
+/* Popover content inside the transport overflow menu. */
+.overflow-btn .context-menu,
+.menu-item .heading { -fx-text-fill: -sp-text; }

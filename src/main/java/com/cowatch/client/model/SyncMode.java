@@ -19,6 +19,22 @@ public enum SyncMode {
         "Jellyfin",
         "Both users stream from the same Jellyfin server.\nThe cleanest option — no file sharing needed.",
         "☁"
+    ),
+
+    /**
+     * Playback lives in a Seanime library, and may have been started from
+     * Seanime rather than from cowatch.
+     *
+     * <p>cowatch attaches to the mpv instance Seanime launched instead of
+     * opening its own, so a room stays in sync whichever side pressed play.
+     * Seanime keeps ownership of the AniList update, because it is already
+     * tracking the episode it started.
+     */
+    SEANIME(
+        "Seanime",
+        "Play from a Seanime library, including episodes its auto-downloader fetched."
+            + "\ncowatch attaches to the mpv window Seanime opens.",
+        "\u2693"
     );
 
     public final String label;

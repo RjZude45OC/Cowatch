@@ -15,73 +15,68 @@ import java.io.IOException;
 import java.util.Properties;
 
 /**
- * Settings panel for the AniList token.
- * Sits in the left column below the offset panel.
+ * AniList token settings.
+ *
+ * <p>A tab in {@link com.cowatch.client.ui.SettingsDialog}. It used to be a
+ * collapsible card in the main window's left column, which meant a form that is
+ * filled in once per install occupied permanent screen space; the collapsible
+ * wrapper it needed for that is gone with it.
  */
 public class TrackingPanel {
 
     private static final String PREFS_FILE = "cowatch-tracking.properties";
 
     private final MainWindow owner;
-    private final VBox       node = new VBox(8);
+    private final VBox       node = new VBox(10);
 
     private final PasswordField aniListTokenField = new PasswordField();
     private final Label         aniListStatus     = new Label("Not verified");
     private final Button        aniListVerifyBtn  = new Button("Verify");
     private final Button        saveBtn           = new Button("Save");
 
-    // Wraps the token entry card so it can be collapsed once a token is
-    // verified — there's no need to keep the form expanded and taking up
-    // space in the left column after that.
-    private TitledPane aniListPane;
-
     private AniListClient aniListClient;
 
     public TrackingPanel(MainWindow owner) {
         this.owner = owner;
         build();
-        // After build(), so the status label and collapsible pane exist by the
-        // time a stored token starts verifying against them.
+        // After build(), so the status label exists by the time a stored token
+        // starts verifying against it.
         loadPrefs();
     }
 
     private void build() {
-        node.setPadding(new Insets(0));
+        node.setPadding(new Insets(12));
+        node.setFillWidth(true);
 
-        aniListTokenField.setPromptText("Paste AniList OAuth token…");
+        aniListTokenField.setPromptText("Paste AniList OAuth token");
         aniListTokenField.setMaxWidth(Double.MAX_VALUE);
 
         aniListStatus.getStyleClass().add("muted");
+        aniListStatus.setWrapText(true);
 
-        aniListVerifyBtn.setOnAction(e -> verifyAniList());
         aniListVerifyBtn.getStyleClass().add("secondary");
+        aniListVerifyBtn.setOnAction(e -> verifyAniList());
 
         saveBtn.getStyleClass().add("accent");
-        saveBtn.setMaxWidth(Double.MAX_VALUE);
         saveBtn.setOnAction(e -> savePrefs());
 
-        VBox aniListBox = new VBox(6,
-                label("AniList OAuth Token"),
+        HBox actions = new HBox(8, saveBtn, aniListVerifyBtn);
+
+        VBox card = new VBox(8,
+                heading("AniList"),
+                label("OAuth token"),
                 aniListTokenField,
-                aniListVerifyBtn,
+                actions,
                 aniListStatus,
-                hint("Get a token at anilist.co/settings/developer — create a "
-                        + "client, choose the Implicit grant, then paste the token here."));
-        aniListBox.getStyleClass().add("card");
+                hint("Get a token at anilist.co/settings/developer: create a client, "
+                        + "choose the Implicit grant, then paste the token here. Progress "
+                        + "is reported once an episode passes 80% watched."));
+        card.getStyleClass().add("card");
 
-        aniListPane = new TitledPane("AniList Tracking", aniListBox);
-        aniListPane.setAnimated(true);
-        aniListPane.getStyleClass().add("anilist-pane");
-        // Starts expanded; verifyAniList() collapses it once a token checks out.
-        aniListPane.setExpanded(true);
-
-        Label heading = new Label("Tracking");
-        heading.getStyleClass().add("heading");
-
-        node.getChildren().addAll(heading, aniListPane, saveBtn);
+        node.getChildren().add(card);
     }
 
-    // ── Verify ───────────────────────────────────────────────────────────
+    // --- Verify -----------------------------------------------------------
 
     private void verifyAniList() {
         String token = aniListTokenField.getText().trim();
@@ -90,7 +85,7 @@ public class TrackingPanel {
             return;
         }
         aniListVerifyBtn.setDisable(true);
-        setStatus("Verifying…", "pending");
+        setStatus("Verifying...", "pending");
 
         Async.run("anilist-verify", () -> {
             AniListClient client = new AniListClient(token);
@@ -99,23 +94,21 @@ public class TrackingPanel {
                 aniListVerifyBtn.setDisable(false);
                 if (username != null) {
                     aniListClient = client;
-                    setStatus("✓ Logged in as " + username, "ok");
-                    // Verified — collapse the form to save space.
-                    aniListPane.setExpanded(false);
+                    setStatus("Signed in as " + username, "ok");
                 } else {
                     aniListClient = null;
-                    setStatus("✗ Invalid token", "error");
+                    setStatus("Invalid token", "error");
                 }
             });
         });
     }
 
-    // ── Accessors ─────────────────────────────────────────────────────────
+    // --- Accessors --------------------------------------------------------
 
     /** The verified AniList client, or null while no token has checked out. */
     public AniListClient getAniListClient() { return aniListClient; }
 
-    // ── Prefs ─────────────────────────────────────────────────────────────
+    // --- Prefs ------------------------------------------------------------
 
     private void savePrefs() {
         Properties p = new Properties();
@@ -123,7 +116,7 @@ public class TrackingPanel {
 
         try {
             AppPrefs.save(PREFS_FILE, p, "cowatch tracking settings");
-            Motion.confirm(saveBtn, "Saved ✓");
+            Motion.confirm(saveBtn, "Saved");
         } catch (IOException ex) {
             owner.showError("Save Failed", "Could not save tracking settings:\n" + ex.getMessage());
         }
@@ -133,13 +126,19 @@ public class TrackingPanel {
         String token = AppPrefs.load(PREFS_FILE).getProperty("anilist.token", "");
         if (token.isEmpty()) return;
         aniListTokenField.setText(token);
-        // A stored token is only trusted once AniList confirms it — verify
+        // A stored token is only trusted once AniList confirms it - verify
         // rather than assuming, so an expired token shows as invalid instead
         // of failing silently on the first episode update.
         verifyAniList();
     }
 
-    // ── UI helpers ────────────────────────────────────────────────────────
+    // --- UI helpers -------------------------------------------------------
+
+    private Label heading(String text) {
+        Label l = new Label(text);
+        l.getStyleClass().add("heading");
+        return l;
+    }
 
     private Label label(String text) {
         Label l = new Label(text);

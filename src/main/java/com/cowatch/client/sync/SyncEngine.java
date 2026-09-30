@@ -63,6 +63,23 @@ public class SyncEngine {
         this.watchedThresholdListener = listener;
     }
 
+    /**
+     * Notified when mpv reports a different loaded file.
+     *
+     * <p>The only way to learn what is on screen when cowatch attached to an mpv
+     * it did not launch - playback started from Seanime, say - since there is no
+     * cowatch-side playlist to consult in that case.
+     */
+    public interface MediaPathListener {
+        void onMediaPathChanged(String path);
+    }
+
+    private volatile MediaPathListener mediaPathListener;
+
+    public void setMediaPathListener(MediaPathListener listener) {
+        this.mediaPathListener = listener;
+    }
+
     public void setPlaylistPositionListener(PlaylistPositionListener listener) {
         this.playlistPositionListener = listener;
     }
@@ -143,6 +160,9 @@ public class SyncEngine {
                             log.info(String.format("Media duration: %.2fs", mediaDuration));
                         }
                     }
+                    case "path" -> {
+                        if (!msg.isNull("data")) handleMediaPathChange(msg.optString("data", ""));
+                    }
                     case "playlist-pos" -> {
                         if (!msg.isNull("data")) {
                             handlePlaylistPosChange(msg.getInt("data"));
@@ -160,6 +180,19 @@ public class SyncEngine {
         } catch (Exception e) {
             log.finest("Non-JSON MPV output: " + rawJson);
         }
+    }
+
+    /** Last path mpv reported, so an unchanged re-report does not re-fire. */
+    private volatile String lastMediaPath = "";
+
+    private void handleMediaPathChange(String path) {
+        if (path == null || path.isBlank()) return;
+        if (path.equals(lastMediaPath)) return;
+        lastMediaPath = path;
+        log.info("MPV loaded: " + path);
+
+        MediaPathListener listener = mediaPathListener;
+        if (listener != null) listener.onMediaPathChanged(path);
     }
 
     /**

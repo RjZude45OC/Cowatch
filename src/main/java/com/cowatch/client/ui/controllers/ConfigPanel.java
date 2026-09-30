@@ -46,7 +46,7 @@ public class ConfigPanel {
     }
 
     private void build() {
-        node.setPadding(new Insets(0));
+        node.setPadding(new Insets(12));
 
         // ── 1. Mode selector ─────────────────────────────────────────
         HBox modeRow = new HBox(6);

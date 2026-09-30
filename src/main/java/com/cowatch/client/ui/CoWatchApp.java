@@ -22,7 +22,10 @@ public class CoWatchApp extends Application {
     @Override
     public void start(Stage stage) {
         MainWindow window = new MainWindow(stage);
-        Scene scene = new Scene(window.getRoot(), 1400, 870);
+        // Opens at roughly two thirds of the old 1400x870: the settings column
+        // is gone, chat starts hidden and the transport bar only appears
+        // while mpv runs, so there is nothing left to fill that space.
+        Scene scene = new Scene(window.getRoot(), 960, 620);
 
         // A missing stylesheet must not take the window down with it — the app
         // is perfectly usable unstyled, and the log says what went missing.

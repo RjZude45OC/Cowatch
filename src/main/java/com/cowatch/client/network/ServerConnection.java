@@ -121,6 +121,28 @@ public class ServerConnection {
                 .toString());
     }
 
+    /**
+     * Announces what this client has started playing.
+     *
+     * <p>Identified by AniList media id and episode number rather than by file
+     * path or library item id, because peers in a room may hold different copies
+     * of the same episode: one streaming from Jellyfin, one playing a file a
+     * Seanime auto-downloader fetched. A path would mean nothing on the other
+     * side; an AniList id each client resolves against its own library does.
+     *
+     * @param source where this client got the episode: "jellyfin", "seanime" or "local"
+     */
+    public void sendMedia(int anilistId, int episode, String title, String source) {
+        if (anilistId <= 0) return;   // nothing the other side could resolve
+        send(new JSONObject()
+                .put("event",     "media")
+                .put("anilistId", anilistId)
+                .put("episode",   episode)
+                .put("title",     title  == null ? "" : title)
+                .put("source",    source == null ? "" : source)
+                .toString());
+    }
+
     private void send(String json) {
         if (out != null && connected) {
             out.println(json);

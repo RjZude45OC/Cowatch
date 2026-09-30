@@ -1,6 +1,7 @@
 package com.cowatch.client.ui.controllers;
 
 import com.cowatch.client.jellyfin.*;
+import com.cowatch.client.seanime.SeanimeClient;
 import com.cowatch.client.model.SyncMode;
 import com.cowatch.client.sync.SyncEngine;
 import com.cowatch.client.tracking.AniListClient;
@@ -83,6 +84,27 @@ public class MediaPanel {
     private final Button                 launchJfBtn  = new Button("▶  Launch in MPV");
     private final Button                 nextJfBtn    = new Button("▶▶  Next Episode");
 
+    // ── Seanime widgets ─────────────────────────────────────────
+    private final TextField     seanimeUrlField   = field("127.0.0.1:43211");
+    private final PasswordField seanimeTokenField = new PasswordField();
+    private final Button        seanimeConnBtn    = new Button("Connect to Seanime");
+    private final Button        seanimeSaveBtn    = new Button("Save");
+    private final Button        attachBtn         = new Button("Attach to Seanime playback");
+    private final Label         seanimeStatus     = new Label("Not connected");
+    private final Label         nowPlayingLabel   = new Label("");
+    private TitledPane          seanimeConnPane;
+
+    private SeanimeClient seanimeClient;
+
+    /** Normalised file path to library entry, for resolving what mpv reports. */
+    private Map<String, SeanimeClient.LocalFile> seanimeLibrary = Map.of();
+
+    /** Stops a run of library misses queuing one full re-index each. */
+    private final AtomicBoolean seanimeReindexing = new AtomicBoolean(false);
+
+    private int seanimeAnilistId = 0;
+    private int seanimeEpisode   = 0;
+
     // ── Local file widgets ────────────────────────────────────────────────
     private final TextField localFileField    = field("No file selected");
     private final Button    browseBtn         = new Button("Browse…");
@@ -125,6 +147,18 @@ public class MediaPanel {
         showsList.setItems(filteredShowItems);
         showSearchField.textProperty().addListener((obs, oldV, newV) -> applyShowFilter(newV));
 
+        // Same reason: a selection listener added inside a builder would stack
+        // one copy per rebuild.
+        episodesList.getSelectionModel().selectedItemProperty()
+                .addListener((obs, old, now) -> launchJfBtn.setDisable(now == null));
+
+        nextJfBtn.setDisable(true);
+        nextLocalBtn.setDisable(true);
+        for (Button b : new Button[] { nextJfBtn, nextLocalBtn }) {
+            b.setMaxWidth(Double.MAX_VALUE);
+            HBox.setHgrow(b, Priority.ALWAYS);
+        }
+
         build();
     }
 
@@ -147,15 +181,14 @@ public class MediaPanel {
         node.setFillWidth(true);
         VBox.setVgrow(node, Priority.ALWAYS);
 
-        Label heading = new Label("Media Source");
-        heading.getStyleClass().add("heading");
-
+        // No "Media Source" heading: this panel is the whole main area, so a
+        // label naming it only repeats what the window already shows.
         card.getStyleClass().add("card");
         card.setFillWidth(true);
         VBox.setVgrow(card,        Priority.ALWAYS);
         VBox.setVgrow(contentArea, Priority.ALWAYS);
 
-        card.getChildren().addAll(heading, contentArea);
+        card.getChildren().add(contentArea);
         node.getChildren().add(card);
         showJellyfinPanel();
     }
@@ -165,13 +198,17 @@ public class MediaPanel {
     public void setMode(SyncMode mode) {
         if (mode == currentMode) return;
         currentMode = mode;
-        if (mode == SyncMode.LOCAL) showLocalPanel();
-        else showJellyfinPanel();
+        switch (mode) {
+            case LOCAL    -> showLocalPanel();
+            case SEANIME  -> showSeanimePanel();
+            case JELLYFIN -> showJellyfinPanel();
+        }
     }
 
     public void previewMode(SyncMode mode) { setMode(mode); }
 
     private void showJellyfinPanel() { contentArea.getChildren().setAll(buildJellyfinPanel()); }
+    private void showSeanimePanel()  { contentArea.getChildren().setAll(buildSeanimePanel()); }
     private void showLocalPanel()    { contentArea.getChildren().setAll(buildLocalPanel()); }
 
     // ── Show search filter ──────────────────────────────────────────────
@@ -357,94 +394,129 @@ public class MediaPanel {
 
     // ── Jellyfin panel ────────────────────────────────────────────────────
 
+    /**
+     * Jellyfin mode: a collapsible connection form over a three-pane browser.
+     *
+     * <p>The browser is side-by-side rather than the three stacked lists it used
+     * to be. Stacked, the panel needed about 600px of height before any list
+     * showed more than four rows; in columns it is usable at half that, which is
+     * most of why the window can open smaller.
+     */
     private VBox buildJellyfinPanel() {
-        jellyfinPassField.setPromptText("password");
+        VBox browser = buildJellyfinBrowser();
+        VBox panel = new VBox(8, buildJellyfinLoginPane(), browser);
+        panel.setFillWidth(true);
+        VBox.setVgrow(browser, Priority.ALWAYS);
+        return panel;
+    }
+
+    /**
+     * The connection form, collapsed by default once credentials are on file.
+     *
+     * <p>Username/password and API key are two ways to do the same thing, so
+     * only one is on screen: the key field hides behind a disclosure link unless
+     * a key is already stored.
+     */
+    private TitledPane buildJellyfinLoginPane() {
+        jellyfinPassField.setPromptText("Password");
         jellyfinPassField.setMaxWidth(Double.MAX_VALUE);
 
-        jellyfinStatus.getStyleClass().addAll("subhead", "jellyfin-status-pending");
-        jellyfinConnBtn.getStyleClass().add("accent");
+        addOnce(jellyfinStatus, "subhead");
+        addOnce(jellyfinStatus, "jellyfin-status-pending");
+        jellyfinStatus.setWrapText(true);
+
+        addOnce(jellyfinConnBtn, "accent");
         jellyfinConnBtn.setMaxWidth(Double.MAX_VALUE);
         jellyfinConnBtn.setOnAction(e -> handleJellyfinConnect());
         HBox.setHgrow(jellyfinConnBtn, Priority.ALWAYS);
 
-        jellyfinSaveBtn.getStyleClass().add("secondary");
+        addOnce(jellyfinSaveBtn, "secondary");
         jellyfinSaveBtn.setOnAction(e -> savePrefs());
 
-        HBox btnRow = new HBox(8, jellyfinConnBtn, jellyfinSaveBtn);
+        VBox apiKeyRow = rowLabel("API key", jellyfinApiField);
+        boolean hasKey = !jellyfinApiField.getText().trim().isEmpty();
+        setShown(apiKeyRow, hasKey);
+
+        Hyperlink apiKeyToggle = new Hyperlink(hasKey ? "Hide API key" : "Use an API key instead");
+        apiKeyToggle.getStyleClass().add("subhead");
+        apiKeyToggle.setOnAction(e -> {
+            boolean show = !apiKeyRow.isManaged();
+            setShown(apiKeyRow, show);
+            apiKeyToggle.setText(show ? "Hide API key" : "Use an API key instead");
+        });
 
         VBox loginBox = new VBox(8,
                 rowLabel("Server URL", jellyfinUrlField),
                 rowLabel("Username",   jellyfinUserField),
                 rowLabel("Password",   jellyfinPassField),
-                rowLabel("API Key",    jellyfinApiField),
-                btnRow,
+                apiKeyToggle,
+                apiKeyRow,
+                new HBox(8, jellyfinConnBtn, jellyfinSaveBtn),
                 jellyfinStatus);
         loginBox.getStyleClass().add("jellyfin-login");
 
-        // Collapsible wrapper — starts expanded unless we're already
-        // connected (e.g. panel rebuilt after switching modes and back),
-        // in which case it stays out of the way.
-        jellyfinLoginPane = new TitledPane("Jellyfin Connection", loginBox);
+        jellyfinLoginPane = new TitledPane("Jellyfin server", loginBox);
         jellyfinLoginPane.setAnimated(true);
         jellyfinLoginPane.getStyleClass().add("jellyfin-login-pane");
-        jellyfinLoginPane.setExpanded(jellyfinClient == null);
+        // Expanded only when there is nothing to connect with yet. A stored
+        // token reconnects on startup, so the form would just be in the way.
+        jellyfinLoginPane.setExpanded(jellyfinClient == null && !hasKey);
+        return jellyfinLoginPane;
+    }
 
-        showSearchField.setPromptText("Search shows & movies…");
-        if (!showSearchField.getStyleClass().contains("search-field"))
-            showSearchField.getStyleClass().add("search-field");
+    private VBox buildJellyfinBrowser() {
+        addOnce(showSearchField, "search-field");
+        showSearchField.setPromptText("Search shows and movies");
 
-        showsList.setPlaceholder(new Label("Connect to Jellyfin to browse"));
-        showsList.setPrefHeight(100); showsList.setMinHeight(60);
-        VBox.setVgrow(showsList, Priority.ALWAYS);
+        showsList.setPlaceholder(new Label("Connect to browse"));
+        seasonsList.setPlaceholder(new Label("Pick a show"));
+        episodesList.setPlaceholder(new Label("Pick a season"));
+
         showsList.setOnMouseClicked(e -> {
             JellyfinItem sel = showsList.getSelectionModel().getSelectedItem();
             if (sel == null) return;
-            // Movies have no Season/Episode hierarchy in Jellyfin — asking
-            // for seasons on a movie's Id returns nothing (or garbage),
-            // which is why movies could never reach the episode list before.
-            if ("Movie".equals(sel.type())) {
-                selectMovie(sel);
-            } else {
-                loadSeasons(sel.id());
-            }
+            // Movies have no Season/Episode hierarchy in Jellyfin - asking for
+            // seasons on a movie's Id returns nothing, which is why movies
+            // could never reach the episode list before.
+            if ("Movie".equals(sel.type())) selectMovie(sel);
+            else                            loadSeasons(sel.id());
         });
 
-        seasonsList.setPlaceholder(new Label("Select a show above"));
-        seasonsList.setPrefHeight(70); seasonsList.setMinHeight(50);
         seasonsList.setOnMouseClicked(e -> {
             JellyfinItem sel = seasonsList.getSelectionModel().getSelectedItem();
             if (sel != null) loadEpisodes(sel.id());
         });
 
-        episodesList.setPlaceholder(new Label("Select a season above"));
-        episodesList.setPrefHeight(100); episodesList.setMinHeight(60);
-        VBox.setVgrow(episodesList, Priority.ALWAYS);
-
-        if (!launchJfBtn.getStyleClass().contains("green")) launchJfBtn.getStyleClass().add("green");
+        addOnce(launchJfBtn, "green");
         launchJfBtn.setMaxWidth(Double.MAX_VALUE);
-        launchJfBtn.setDisable(true);
+        launchJfBtn.setDisable(episodesList.getSelectionModel().getSelectedItem() == null);
         launchJfBtn.setOnAction(e -> handleJellyfinLaunch());
+        HBox.setHgrow(launchJfBtn, Priority.ALWAYS);
 
-        nextJfBtn.setMaxWidth(Double.MAX_VALUE);
-        nextJfBtn.setDisable(true);
         nextJfBtn.setOnAction(e -> handleNextEpisode(true));
 
-        episodesList.getSelectionModel().selectedItemProperty()
-                .addListener((obs, old, now) -> launchJfBtn.setDisable(now == null));
+        HBox panes = new HBox(8,
+                listColumn("Shows & movies", showsList),
+                listColumn("Seasons",        seasonsList),
+                listColumn("Episodes",       episodesList));
+        panes.setFillHeight(true);
+        VBox.setVgrow(panes, Priority.ALWAYS);
 
-        VBox browserBox = new VBox(6,
-                sectionLabel("Shows / Movies"), showSearchField, showsList,
-                sectionLabel("Seasons"),        seasonsList,
-                sectionLabel("Episodes"),       episodesList,
-                launchJfBtn, nextJfBtn);
-        browserBox.setFillWidth(true);
-        VBox.setVgrow(showsList, Priority.ALWAYS);
-        VBox.setVgrow(episodesList, Priority.ALWAYS);
+        VBox box = new VBox(8, showSearchField, panes, new HBox(8, launchJfBtn, nextJfBtn));
+        box.setFillWidth(true);
+        return box;
+    }
 
-        VBox panel = new VBox(10, jellyfinLoginPane, browserBox);
-        panel.setFillWidth(true);
-        VBox.setVgrow(browserBox, Priority.ALWAYS);
-        return panel;
+    /** One pane of the three-pane browser: a small caption over its list. */
+    private VBox listColumn(String title, ListView<JellyfinItem> list) {
+        list.setMinHeight(110);
+        list.setPrefHeight(240);
+        VBox col = new VBox(4, sectionLabel(title), list);
+        col.setFillWidth(true);
+        col.setMinWidth(104);
+        VBox.setVgrow(list, Priority.ALWAYS);
+        HBox.setHgrow(col, Priority.ALWAYS);
+        return col;
     }
 
     // ── Local file panel ──────────────────────────────────────────────────
@@ -476,12 +548,11 @@ public class MediaPanel {
         localFileField.setMaxWidth(Double.MAX_VALUE);
         localFileField.setPromptText("Click Browse to pick a file…");
 
-        if (!launchLocalBtn.getStyleClass().contains("green")) launchLocalBtn.getStyleClass().add("green");
+        addOnce(launchLocalBtn, "green");
         launchLocalBtn.setMaxWidth(Double.MAX_VALUE);
         launchLocalBtn.setOnAction(e -> handleLocalLaunch());
+        HBox.setHgrow(launchLocalBtn, Priority.ALWAYS);
 
-        nextLocalBtn.setMaxWidth(Double.MAX_VALUE);
-        nextLocalBtn.setDisable(true);
         nextLocalBtn.setOnAction(e -> handleNextEpisode(false));
 
         playlistLabel.getStyleClass().add("subhead");
@@ -503,10 +574,10 @@ public class MediaPanel {
         hint.setWrapText(true);
         hint.getStyleClass().add("subhead");
 
-        VBox panel = new VBox(12,
-                sectionLabel("Select local media file"),
+        VBox panel = new VBox(10,
+                sectionLabel("Local media file"),
                 fileRow, playlistLabel, hint,
-                launchLocalBtn, nextLocalBtn);
+                new HBox(8, launchLocalBtn, nextLocalBtn));
         panel.setFillWidth(true);
         panel.setAlignment(Pos.TOP_LEFT);
         return panel;
@@ -582,10 +653,14 @@ public class MediaPanel {
         if (!reportedThisEpisode.compareAndSet(false, true)) return; // already reported
 
         Platform.runLater(() -> {
-            if (currentMode == SyncMode.JELLYFIN) {
-                reportJellyfinWatched();
-            } else if (currentMode == SyncMode.LOCAL) {
-                reportLocalWatched();
+            switch (currentMode) {
+                case JELLYFIN -> reportJellyfinWatched();
+                case LOCAL    -> reportLocalWatched();
+                // Seanime started the episode and is already tracking it. A second
+                // writer on the same AniList entry would race the first, and
+                // Seanime's episode mapping is better than the AniZip fallback
+                // here, so cowatch deliberately reports nothing in this mode.
+                case SEANIME  -> log.info("Seanime mode: leaving the AniList update to Seanime");
             }
         });
     }
@@ -690,7 +765,7 @@ public class MediaPanel {
         String key  = jellyfinApiField.getText().trim();
 
         jellyfinConnBtn.setDisable(true);
-        setJellyfinStatus("⏳ Connecting…", "pending");
+        setJellyfinStatus("Connecting...", "pending");
 
         Async.run("jellyfin-auth", () -> {
             jellyfinClient = new JellyfinClient(url);
@@ -714,16 +789,22 @@ public class MediaPanel {
                     allShowItems.setAll(shows);
                     allShowItems.addAll(movies);
                     applyShowFilter(showSearchField.getText());
-                    setJellyfinStatus("✓ Connected — " + (shows.size() + movies.size()) + " items", "ok");
-                    jellyfinConnBtn.setText("Connected ✓");
+                    setJellyfinStatus("Connected — " + (shows.size() + movies.size()) + " items", "ok");
+                    jellyfinConnBtn.setText("Connected");
                     // Free up vertical space now that we're connected —
                     // collapse the login form so the browser gets more room.
                     if (jellyfinLoginPane != null) jellyfinLoginPane.setExpanded(false);
                 });
             } else {
+                // Report what the server actually said. Jellyfin 12 answers 400
+                // to a login it cannot attribute to a device, which is
+                // indistinguishable from a bad password in a generic message.
+                final String reason = jellyfinClient.getLastError();
                 Platform.runLater(() -> {
-                    setJellyfinStatus("✗ Connection failed — check URL / credentials", "error");
+                    setJellyfinStatus(reason == null ? "Connection failed" : reason, "error");
                     jellyfinConnBtn.setDisable(false);
+                    jellyfinConnBtn.setText("Connect to Jellyfin");
+                    if (jellyfinLoginPane != null) jellyfinLoginPane.setExpanded(true);
                 });
             }
         });
@@ -778,6 +859,7 @@ public class MediaPanel {
         int startIndex = jfEpisodeList.indexOf(selected);
 
         launchPlaylist(urls, startIndex, true);
+        announceJellyfinEpisode(selected);
 
         // Report playback start + start periodic progress ticks
         final JellyfinItem startItem = selected;
@@ -797,6 +879,33 @@ public class MediaPanel {
         });
     }
 
+    /**
+     * Tells the room which episode this client just started from Jellyfin.
+     *
+     * <p>Resolving the AniList id costs a search, so this runs in the background
+     * and stays silent on a miss: failing to announce only costs the other side
+     * the convenience of being told what to open, while blocking playback on a
+     * lookup would be much worse.
+     */
+    private void announceJellyfinEpisode(JellyfinItem item) {
+        AniListClient aniList = owner.getTrackingPanel().getAniListClient();
+        if (aniList == null || !aniList.hasToken()) return;
+
+        Async.run("jellyfin-announce", () -> {
+            String searchTitle = item.seriesName().isBlank() ? item.name() : item.seriesName();
+            int anilistId = aniList.searchMediaId(searchTitle, item.year());
+            if (anilistId <= 0) {
+                log.info("Not announcing: no AniList match for '" + searchTitle + "'");
+                return;
+            }
+            int relativeEp = aniZip.resolveJellyfinEpisode(
+                    anilistId, item.seasonNumber(), item.episodeNumber());
+            final int episode = relativeEp > 0 ? relativeEp : item.episodeNumber();
+            Platform.runLater(() ->
+                    owner.announceMedia(anilistId, episode, searchTitle, "jellyfin"));
+        });
+    }
+
     // ── Preferences ───────────────────────────────────────────────────────
 
     private void savePrefs() {
@@ -804,6 +913,8 @@ public class MediaPanel {
         p.setProperty("jellyfin.url",      jellyfinUrlField.getText().trim());
         p.setProperty("jellyfin.username", jellyfinUserField.getText().trim());
         p.setProperty("jellyfin.apikey",   jellyfinApiField.getText().trim());
+        p.setProperty("seanime.url",        seanimeUrlField.getText().trim());
+        p.setProperty("seanime.token",      seanimeTokenField.getText().trim());
         // The password is deliberately absent: this file is plain text. A
         // successful login stores the access token Jellyfin hands back
         // instead, which reconnects just as well and can be revoked server
@@ -822,6 +933,8 @@ public class MediaPanel {
         jellyfinUrlField.setText( p.getProperty("jellyfin.url",      ""));
         jellyfinUserField.setText(p.getProperty("jellyfin.username", ""));
         jellyfinApiField.setText( p.getProperty("jellyfin.apikey",   ""));
+        seanimeUrlField.setText(  p.getProperty("seanime.url",       seanimeUrlField.getText()));
+        seanimeTokenField.setText(p.getProperty("seanime.token",     ""));
 
         // Reconnect unattended only when a stored token can do it without a
         // password prompt. Anything else waits for the user to press Connect.
@@ -854,6 +967,211 @@ public class MediaPanel {
         }
     }
 
+    // --- Seanime panel ----------------------------------------------------
+
+    /**
+     * Seanime mode: connect to the server, then attach to the player it opens.
+     *
+     * <p>Deliberately not a library browser. The point of this mode is that the
+     * viewer picks and plays the episode in Seanime - that is where their
+     * auto-downloader, their release-group rules and their episode matching
+     * already live - and cowatch joins the mpv window it opens. Duplicating the
+     * browser here would mean reimplementing all of that badly.
+     */
+    private VBox buildSeanimePanel() {
+        addOnce(seanimeStatus, "subhead");
+        addOnce(seanimeStatus, "jellyfin-status-pending");
+        seanimeStatus.setWrapText(true);
+
+        addOnce(seanimeConnBtn, "accent");
+        seanimeConnBtn.setMaxWidth(Double.MAX_VALUE);
+        seanimeConnBtn.setOnAction(e -> handleSeanimeConnect());
+        HBox.setHgrow(seanimeConnBtn, Priority.ALWAYS);
+
+        addOnce(seanimeSaveBtn, "secondary");
+        seanimeSaveBtn.setOnAction(e -> savePrefs());
+
+        VBox tokenRow = rowLabel("Server password", seanimeTokenField);
+        boolean hasToken = !seanimeTokenField.getText().trim().isEmpty();
+        setShown(tokenRow, hasToken);
+
+        Hyperlink tokenToggle = new Hyperlink(hasToken ? "Hide password" : "Server has a password");
+        tokenToggle.getStyleClass().add("subhead");
+        tokenToggle.setOnAction(e -> {
+            boolean show = !tokenRow.isManaged();
+            setShown(tokenRow, show);
+            tokenToggle.setText(show ? "Hide password" : "Server has a password");
+        });
+
+        VBox connBox = new VBox(8,
+                rowLabel("Seanime address", seanimeUrlField),
+                tokenToggle,
+                tokenRow,
+                new HBox(8, seanimeConnBtn, seanimeSaveBtn),
+                seanimeStatus);
+        connBox.getStyleClass().add("jellyfin-login");
+
+        seanimeConnPane = new TitledPane("Seanime server", connBox);
+        seanimeConnPane.setAnimated(true);
+        seanimeConnPane.getStyleClass().add("jellyfin-login-pane");
+        seanimeConnPane.setExpanded(seanimeClient == null);
+
+        addOnce(attachBtn, "green");
+        attachBtn.setMaxWidth(Double.MAX_VALUE);
+        attachBtn.setDisable(seanimeClient == null);
+        attachBtn.setOnAction(e -> handleSeanimeAttach());
+        HBox.setHgrow(attachBtn, Priority.ALWAYS);
+
+        nowPlayingLabel.setWrapText(true);
+        addOnce(nowPlayingLabel, "subhead");
+
+        Label hint = new Label(
+                "Start the episode in Seanime, then press Attach. cowatch joins the mpv "
+              + "window Seanime opened, so play, pause and seek stay in sync whichever "
+              + "side presses them. Seanime keeps updating AniList itself.");
+        hint.setWrapText(true);
+        hint.getStyleClass().add("subhead");
+
+        VBox panel = new VBox(10,
+                seanimeConnPane,
+                sectionLabel("Playback"),
+                attachBtn,
+                nowPlayingLabel,
+                hint);
+        panel.setFillWidth(true);
+        return panel;
+    }
+
+    // --- Seanime handlers -------------------------------------------------
+
+    private void handleSeanimeConnect() {
+        final String url   = seanimeUrlField.getText().trim();
+        final String token = seanimeTokenField.getText().trim();
+
+        seanimeConnBtn.setDisable(true);
+        setSeanimeStatus("Connecting...", "pending");
+
+        Async.run("seanime-connect", () -> {
+            SeanimeClient client = new SeanimeClient(url, token);
+            String error = client.connect();
+            Map<String, SeanimeClient.LocalFile> index =
+                    (error == null) ? client.indexLocalFiles() : Map.of();
+
+            Platform.runLater(() -> {
+                seanimeConnBtn.setDisable(false);
+                if (error != null) {
+                    seanimeClient = null;
+                    seanimeLibrary = Map.of();
+                    attachBtn.setDisable(true);
+                    setSeanimeStatus(error, "error");
+                    if (seanimeConnPane != null) seanimeConnPane.setExpanded(true);
+                    return;
+                }
+
+                seanimeClient  = client;
+                seanimeLibrary = index;
+                attachBtn.setDisable(false);
+                seanimeConnBtn.setText("Connected");
+                savePrefs();
+
+                String who = client.getUserName().isEmpty() ? "" : " as " + client.getUserName();
+                String socket = client.getMpvSocket();
+                if (socket.isBlank()) {
+                    // Worth saying up front rather than at Attach time: the fix is
+                    // in Seanime's settings, not here.
+                    setSeanimeStatus("Connected" + who + " - " + index.size() + " files indexed. "
+                            + "No fixed mpv socket set in Seanime, so attaching will not work yet: "
+                            + "set one under Settings, Media Player, mpv socket.", "error");
+                } else {
+                    setSeanimeStatus("Connected" + who + " - " + index.size()
+                            + " files indexed, mpv socket " + socket, "ok");
+                    if (seanimeConnPane != null) seanimeConnPane.setExpanded(false);
+                }
+            });
+        });
+    }
+
+    /**
+     * Attaches cowatch to the mpv window Seanime opened.
+     *
+     * <p>No player is launched here. If nothing is playing in Seanime yet there is
+     * no socket to connect to, and the error says so rather than starting a second,
+     * unrelated mpv.
+     */
+    private void handleSeanimeAttach() {
+        if (seanimeClient == null) return;
+        final String socket = seanimeClient.getMpvSocket();
+
+        attachBtn.setDisable(true);
+        attachBtn.setText("Attaching...");
+        owner.onAttachToSeanime(socket);
+    }
+
+    /** Called by MainWindow once an attach attempt has finished. */
+    public void onSeanimeAttached(boolean success) {
+        attachBtn.setText(success ? "Attached" : "Attach to Seanime playback");
+        attachBtn.setDisable(success);
+        if (!success) nowPlayingLabel.setText("");
+    }
+
+    /**
+     * Resolves the file mpv reports against Seanime's library and tells the room.
+     *
+     * <p>This is the hop that makes a mixed room work: the path is meaningless to
+     * a viewer streaming from Jellyfin, but the AniList id it maps to is not.
+     *
+     * <p>Called on the FX thread from MainWindow's SyncEngine listener.
+     */
+    public void onSeanimeMediaPath(String path) {
+        if (seanimeClient == null) return;
+
+        SeanimeClient.LocalFile file = seanimeLibrary.get(SeanimeClient.normalizePath(path));
+        if (file == null) {
+            // Playing something outside the scanned library, or the library changed
+            // since connect. Re-index once in the background rather than giving up.
+            nowPlayingLabel.setText("Playing a file Seanime has not scanned: "
+                    + new File(path).getName());
+            reindexSeanimeLibrary();
+            return;
+        }
+
+        seanimeAnilistId = file.anilistId();
+        seanimeEpisode   = file.episode();
+        nowPlayingLabel.setText("Episode " + file.episode()
+                + "  (AniList id " + file.anilistId() + ")");
+
+        // Announce to the room so the other side can open its own copy.
+        owner.announceMedia(file.anilistId(), file.episode(),
+                new File(file.path()).getName(), "seanime");
+    }
+
+    /**
+     * Refreshes the path index after a miss.
+     *
+     * <p>Guarded so a run of misses - every file in an unscanned folder, say -
+     * cannot queue one full library fetch per event.
+     */
+    private void reindexSeanimeLibrary() {
+        if (seanimeClient == null) return;
+        if (!seanimeReindexing.compareAndSet(false, true)) return;
+
+        final SeanimeClient client = seanimeClient;
+        Async.run("seanime-reindex", () -> {
+            Map<String, SeanimeClient.LocalFile> index = client.indexLocalFiles();
+            Platform.runLater(() -> {
+                seanimeReindexing.set(false);
+                if (seanimeClient == client) seanimeLibrary = index;
+            });
+        });
+    }
+
+    private void setSeanimeStatus(String text, String state) {
+        seanimeStatus.setText(text);
+        seanimeStatus.getStyleClass()
+                .removeAll("jellyfin-status-pending", "jellyfin-status-ok", "jellyfin-status-error");
+        seanimeStatus.getStyleClass().add("jellyfin-status-" + state);
+    }
+
     // ── UI helpers ────────────────────────────────────────────────────────
 
     private VBox rowLabel(String labelText, Control control) {
@@ -861,6 +1179,23 @@ public class MediaPanel {
         lbl.getStyleClass().add("muted");
         control.setMaxWidth(Double.MAX_VALUE);
         return new VBox(3, lbl, control);
+    }
+
+    /**
+     * Adds a style class only if it is missing.
+     *
+     * <p>The widgets here are long-lived fields while the panels around them are
+     * rebuilt on every mode switch, so an unguarded add would append the same
+     * class again on each pass.
+     */
+    private static void addOnce(javafx.scene.Node node, String styleClass) {
+        if (!node.getStyleClass().contains(styleClass)) node.getStyleClass().add(styleClass);
+    }
+
+    /** Shows or hides a node, and stops a hidden one reserving layout space. */
+    private static void setShown(javafx.scene.Node node, boolean shown) {
+        node.setVisible(shown);
+        node.setManaged(shown);
     }
 
     private Label sectionLabel(String text) {
