@@ -9,8 +9,6 @@ import com.cowatch.client.util.Async;
 
 import javafx.application.Platform;
 import javafx.geometry.Insets;
-import javafx.geometry.Orientation;
-import javafx.geometry.Side;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
 import javafx.stage.Stage;
@@ -21,13 +19,23 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Supplier;
 
+/**
+ * The application shell.
+ *
+ * <p>The window is deliberately thin: a header, the media browser, and a
+ * transport bar that appears only while mpv runs. Chat is an optional second
+ * column, and the server / sync-mode / tracking settings live in
+ * {@link SettingsDialog}. Everything that a session configures once is one
+ * click away rather than permanently on screen, which is what lets the window
+ * open at roughly two thirds of its old size.
+ */
 public class MainWindow {
 
-    // ── Responsive breakpoints (px of window width) ──────────────────────
-    private static final double PHONE_MAX  = 760;
-    private static final double TABLET_MAX = 1180;
+    /** Below this width the chat column stacks over the media panel instead. */
+    private static final double SIDE_BY_SIDE_MIN = 900;
 
-    private enum LayoutMode { PHONE, TABLET, DESKTOP }
+    /** Below this width paddings and control sizes tighten (.compact). */
+    private static final double COMPACT_MAX = 720;
 
     private final Stage      stage;
     private final BorderPane root = new BorderPane();
@@ -43,15 +51,14 @@ public class MainWindow {
     private final PlaybackControls playbackControls;
     private final OffsetPanel      offsetPanel;
     private final TrackingPanel    trackingPanel;
+    private final SettingsDialog   settings;
 
-    // Containers are created once; panels move between them as the
-    // layout mode changes (JavaFX auto-reparents nodes).
-    private ScrollPane leftScroll;
-    private VBox       leftContent;
-    private VBox       centre;
-    private VBox       right;
+    /** Wrappers created once; the centre is re-composed as chat toggles. */
+    private final VBox centre = new VBox();
+    private final VBox right  = new VBox();
 
-    private LayoutMode layoutMode;
+    private boolean chatShown = false;
+    private boolean sideBySide = true;
 
     /** Serialises mpv IPC commands so UI clicks never block the FX thread. */
     private final ExecutorService mpvExecutor =
@@ -65,15 +72,19 @@ public class MainWindow {
         headerBar        = new HeaderBar();
         configPanel      = new ConfigPanel(this);
         mediaPanel       = new MediaPanel(this);
-        playbackControls = new PlaybackControls(this);
-        chatPanel        = new ChatPanel(server);
         offsetPanel      = new OffsetPanel();
+        playbackControls = new PlaybackControls(this, offsetPanel);
+        chatPanel        = new ChatPanel(server);
         trackingPanel    = new TrackingPanel(this);
+        settings         = new SettingsDialog(stage, configPanel, trackingPanel);
 
         wireSyncEngine();
-        // Registered once, not per connection — re-registering on every
+        // Registered once, not per connection - re-registering on every
         // connect would stack handlers and run the teardown repeatedly.
         headerBar.setOnDisconnect(this::onDisconnect);
+        headerBar.setOnConnect(() -> settings.show(0));
+        headerBar.setOnOpenSettings(settings::show);
+        headerBar.setOnToggleChat(this::toggleChat);
 
         buildLayout();
         wireShutdown();
@@ -84,117 +95,95 @@ public class MainWindow {
         mediaPanel.setSyncEngine(syncEngine);
     }
 
-    // ── Responsive layout ───────────────────────────────────────────────
+    // --- Layout -----------------------------------------------------------
 
     private void buildLayout() {
-        root.setTop(headerBar.getNode());
         root.getStyleClass().add("app-root");
+        root.setTop(headerBar.getNode());
+        root.setBottom(playbackControls.getNode());
 
-        VBox.setVgrow(offsetPanel.getNode(),      Priority.ALWAYS);
-        VBox.setVgrow(playbackControls.getNode(), Priority.ALWAYS);
-
-        leftContent = new VBox(8,
-                configPanel.getNode(),
-                offsetPanel.getNode(),
-                playbackControls.getNode(),
-                trackingPanel.getNode());
-        leftContent.setPadding(new Insets(10));
-        leftContent.setFillWidth(true);
-
-        leftScroll = new ScrollPane(leftContent);
-        leftScroll.setFitToWidth(true);
-        // dark.css keys the column's tighter card padding and transparent
-        // viewport off .left-scroll — the name must match, or that whole
-        // block silently does nothing.
-        leftScroll.getStyleClass().add("left-scroll");
-
-        centre = new VBox(mediaPanel.getNode());
         centre.setPadding(new Insets(10));
         centre.setFillWidth(true);
+        centre.getChildren().add(mediaPanel.getNode());
         VBox.setVgrow(mediaPanel.getNode(), Priority.ALWAYS);
 
-        right = new VBox(chatPanel.getNode());
-        right.setPadding(new Insets(10));
+        right.setPadding(new Insets(10, 10, 10, 0));
         right.setFillWidth(true);
+        right.getChildren().add(chatPanel.getNode());
         VBox.setVgrow(chatPanel.getNode(), Priority.ALWAYS);
 
-        // Floor low enough that the single-column phone layout is reachable.
+        // Low enough that the single-column layout stays reachable.
         // CoWatchApp must not raise this.
-        stage.setMinWidth(340);
-        stage.setMinHeight(520);
+        stage.setMinWidth(380);
+        stage.setMinHeight(460);
 
-        // Re-classify on every resize — cheap, only swaps on threshold crossing
-        root.widthProperty().addListener((obs, oldW, newW) ->
-                applyLayout(classify(newW.doubleValue())));
+        root.widthProperty().addListener((obs, oldW, newW) -> applyWidth(newW.doubleValue()));
 
         // Tactile press-squish for every button, once a Scene exists
         root.sceneProperty().addListener((obs, oldScene, newScene) -> {
             if (newScene != null) Motion.installPressSquish(newScene);
         });
 
-        applyLayout(LayoutMode.DESKTOP);  // default; listener corrects on first layout
+        headerBar.setChatShown(false);
+        refreshCentre();
+        Platform.runLater(() -> Motion.staggeredReveal(root));
     }
 
-    private LayoutMode classify(double width) {
-        if (width < PHONE_MAX)  return LayoutMode.PHONE;
-        if (width < TABLET_MAX) return LayoutMode.TABLET;
-        return LayoutMode.DESKTOP;
-    }
+    /**
+     * Re-classifies the window on resize. Only a threshold crossing does any
+     * work; a plain drag between two sizes in the same band is a no-op.
+     */
+    private void applyWidth(double width) {
+        boolean nowSideBySide = width >= SIDE_BY_SIDE_MIN;
+        boolean nowCompact    = width < COMPACT_MAX;
 
-    private void applyLayout(LayoutMode mode) {
-        if (mode == layoutMode) return;
-        boolean firstLayout = (layoutMode == null);
-        layoutMode = mode;
-
-        root.getStyleClass().removeAll(
-                "layout-phone", "layout-tablet", "layout-desktop", "compact");
-
-        switch (mode) {
-            case PHONE -> {
-                // Single column + bottom tab navigation
-                root.getStyleClass().addAll("layout-phone", "compact");
-                TabPane tabs = new TabPane(
-                        new Tab("Controls", leftScroll),
-                        new Tab("Media",    centre),
-                        new Tab("Chat",     right));
-                tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
-                tabs.setSide(Side.BOTTOM);
-                tabs.setTabMinWidth(72);
-                tabs.setTabMinHeight(44);
-                root.setCenter(tabs);
-            }
-            case TABLET -> {
-                // Controls column  |  media stacked over chat
-                root.getStyleClass().add("layout-tablet");
-                SplitPane mediaChat = new SplitPane(centre, right);
-                mediaChat.setOrientation(Orientation.VERTICAL);
-                mediaChat.setDividerPositions(0.62);
-                SplitPane split = new SplitPane(leftScroll, mediaChat);
-                split.getStyleClass().add("app-split");
-                // Deliberately narrow: the shows/episodes lists in the media
-                // column need the horizontal room more than the controls do.
-                split.setDividerPositions(0.30);
-                root.setCenter(split);
-            }
-            case DESKTOP -> {
-                // Classic three-column theatre
-                root.getStyleClass().add("layout-desktop");
-                SplitPane split = new SplitPane(leftScroll, centre, right);
-                split.getStyleClass().add("app-split");
-                split.setDividerPositions(0.27, 0.72);
-                root.setCenter(split);
-            }
+        boolean wasCompact = root.getStyleClass().contains("compact");
+        if (nowCompact != wasCompact) {
+            if (nowCompact) root.getStyleClass().add("compact");
+            else            root.getStyleClass().remove("compact");
         }
 
-        if (firstLayout) {
-            // One orchestrated curtain-up, after the first layout pass
-            Platform.runLater(() -> Motion.staggeredReveal(root));
+        if (nowSideBySide != sideBySide) {
+            sideBySide = nowSideBySide;
+            refreshCentre();
+        }
+    }
+
+    /**
+     * Puts the right thing in the centre for the current chat state and width.
+     *
+     * <p>Narrow windows swap chat in for the media panel rather than squeezing
+     * both into a split - two 190px columns are worse than one usable one.
+     */
+    private void refreshCentre() {
+        if (!chatShown) {
+            root.setCenter(centre);
+        } else if (sideBySide) {
+            SplitPane split = new SplitPane(centre, right);
+            split.getStyleClass().add("app-split");
+            split.setDividerPositions(0.66);
+            root.setCenter(split);
         } else {
-            Motion.crossfade(root.getCenter());
+            root.setCenter(right);
         }
+        Motion.crossfade(root.getCenter());
     }
 
-    // ── Connect / disconnect ──────────────────────────────────────────────
+    private void toggleChat() {
+        chatShown = !chatShown;
+        headerBar.setChatShown(chatShown);
+        refreshCentre();
+    }
+
+    /**
+     * Appends to the chat transcript and, when the column is hidden, marks the
+     * header toggle so activity is not lost behind a closed panel.
+     */
+    private void noteChatActivity() {
+        if (!chatShown) headerBar.setChatUnread(true);
+    }
+
+    // --- Connect / disconnect ---------------------------------------------
 
     public void onConnect(SessionConfig config) throws IOException {
         boolean ok = server.connect(config.serverHost, config.serverPort);
@@ -213,11 +202,16 @@ public class MainWindow {
         wireSyncEngine();
 
         server.addMessageHandler(msg ->
-                Platform.runLater(() -> chatPanel.appendMessage(msg)));
+                Platform.runLater(() -> {
+                    chatPanel.appendMessage(msg);
+                    noteChatActivity();
+                }));
 
         server.joinRoom(config.roomId, config.username);
         headerBar.setConnected(config.serverHost, config.roomId);
         configPanel.onConnected();
+        // The settings window has served its purpose once a room is joined.
+        settings.hide();
         mediaPanel.setMode(config.mode);
 
         if (!mpv.isRunning()) playbackControls.setEnabled(false);
@@ -228,21 +222,27 @@ public class MainWindow {
         syncEngine.close();
         headerBar.setDisconnected();
         if (!mpv.isRunning()) playbackControls.setEnabled(false);
-        chatPanel.appendRaw("[system] Disconnected from server");
+        systemMessage("Disconnected from server");
         configPanel.onDisconnected();
     }
 
-    // ── Launch ────────────────────────────────────────────────────────────
+    /** Logs an app event to the chat transcript and flags it if chat is hidden. */
+    private void systemMessage(String text) {
+        chatPanel.appendRaw("[system] " + text);
+        noteChatActivity();
+    }
+
+    // --- Launch -----------------------------------------------------------
 
     /** Launches a single file or URL in mpv. */
     public void onLaunch(String mpvUrl) {
-        launch(() -> mpv.launch(mpvUrl), "MPV launched ✓");
+        launch(() -> mpv.launch(mpvUrl), "MPV launched");
     }
 
     /** Launches a playlist in mpv, starting at {@code startIndex}. */
     public void onLaunchPlaylist(List<String> entries, int startIndex) {
         launch(() -> mpv.launch(entries, startIndex),
-               "MPV launched ✓ (" + entries.size() + " episodes)");
+               "MPV launched (" + entries.size() + " episodes)");
     }
 
     /**
@@ -260,7 +260,7 @@ public class MainWindow {
                 mediaPanel.onMpvLaunched(ok);
                 if (ok) {
                     playbackControls.setEnabled(true);
-                    chatPanel.appendRaw("[system] " + okMessage);
+                    systemMessage(okMessage);
                 } else {
                     showError("Failed to launch MPV", error);
                 }
@@ -277,7 +277,7 @@ public class MainWindow {
         });
     }
 
-    // ── Next episode (IPC only) ───────────────────────────────────────────
+    // --- Next episode (IPC only) ------------------------------------------
 
     public void onNextEpisode() {
         if (!mpv.isRunning()) {
@@ -291,11 +291,11 @@ public class MainWindow {
 
     private void onMpvClosed() {
         playbackControls.setEnabled(false);
-        chatPanel.appendRaw("[system] MPV closed");
+        systemMessage("MPV closed");
         mediaPanel.onMpvClosed(true);
     }
 
-    // ── Panel accessors ───────────────────────────────────────────────────
+    // --- Panel accessors --------------------------------------------------
 
     public MediaPanel    getMediaPanel()    { return mediaPanel; }
     public TrackingPanel getTrackingPanel() { return trackingPanel; }
@@ -303,7 +303,7 @@ public class MainWindow {
     /** Last playback position mpv reported, in seconds. */
     public double getPosition() { return syncEngine.getPosition(); }
 
-    // ── Playback actions ──────────────────────────────────────────────────
+    // --- Playback actions -------------------------------------------------
 
     public void doPlay()                 { mpvExecutor.submit(() -> syncEngine.localPlay()); }
     public void doPause()                { mpvExecutor.submit(() -> syncEngine.localPause()); }
@@ -311,7 +311,7 @@ public class MainWindow {
     public void doSkipForward(double s)  { mpvExecutor.submit(() -> syncEngine.localSkipForward(s)); }
     public void doSkipBackward(double s) { mpvExecutor.submit(() -> syncEngine.localSkipBackward(s)); }
 
-    // ── Error dialogs ─────────────────────────────────────────────────────
+    // --- Error dialogs ----------------------------------------------------
 
     public void showError(String msg) { showError("Error", msg, null); }
 
@@ -320,35 +320,22 @@ public class MainWindow {
     public void showError(String title, String body, Runnable onClose) {
         Platform.runLater(() -> {
             Alert alert = new Alert(Alert.AlertType.ERROR);
-            alert.setTitle("cowatch — " + title);
+            alert.setTitle("cowatch \u2014 " + title);
             alert.setHeaderText(title);
+            alert.setContentText(body);
             alert.initOwner(stage);
-
-            TextArea textArea = new TextArea(body);
-            textArea.setEditable(false);
-            textArea.setWrapText(true);
-            textArea.setMaxWidth(Double.MAX_VALUE);
-            textArea.setMaxHeight(Double.MAX_VALUE);
-            GridPane.setVgrow(textArea, Priority.ALWAYS);
-            GridPane.setHgrow(textArea, Priority.ALWAYS);
-
-            GridPane expContent = new GridPane();
-            expContent.setMaxWidth(Double.MAX_VALUE);
-            expContent.add(textArea, 0, 0);
-
-            alert.getDialogPane().setExpandableContent(expContent);
-            alert.getDialogPane().setExpanded(true);
-            alert.getDialogPane().setPrefWidth(520);
-
+            alert.getDialogPane().setPrefWidth(460);
+            alert.getDialogPane().setMinHeight(Region.USE_PREF_SIZE);
             alert.showAndWait();
             if (onClose != null) onClose.run();
         });
     }
 
-    // ── Shutdown ──────────────────────────────────────────────────────────
+    // --- Shutdown ---------------------------------------------------------
 
     private void wireShutdown() {
         stage.setOnCloseRequest(e -> {
+            settings.hide();
             mpvExecutor.shutdownNow();
             syncEngine.close();
             server.disconnect();

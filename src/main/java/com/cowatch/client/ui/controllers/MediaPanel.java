@@ -125,6 +125,18 @@ public class MediaPanel {
         showsList.setItems(filteredShowItems);
         showSearchField.textProperty().addListener((obs, oldV, newV) -> applyShowFilter(newV));
 
+        // Same reason: a selection listener added inside a builder would stack
+        // one copy per rebuild.
+        episodesList.getSelectionModel().selectedItemProperty()
+                .addListener((obs, old, now) -> launchJfBtn.setDisable(now == null));
+
+        nextJfBtn.setDisable(true);
+        nextLocalBtn.setDisable(true);
+        for (Button b : new Button[] { nextJfBtn, nextLocalBtn }) {
+            b.setMaxWidth(Double.MAX_VALUE);
+            HBox.setHgrow(b, Priority.ALWAYS);
+        }
+
         build();
     }
 
@@ -147,15 +159,14 @@ public class MediaPanel {
         node.setFillWidth(true);
         VBox.setVgrow(node, Priority.ALWAYS);
 
-        Label heading = new Label("Media Source");
-        heading.getStyleClass().add("heading");
-
+        // No "Media Source" heading: this panel is the whole main area, so a
+        // label naming it only repeats what the window already shows.
         card.getStyleClass().add("card");
         card.setFillWidth(true);
         VBox.setVgrow(card,        Priority.ALWAYS);
         VBox.setVgrow(contentArea, Priority.ALWAYS);
 
-        card.getChildren().addAll(heading, contentArea);
+        card.getChildren().add(contentArea);
         node.getChildren().add(card);
         showJellyfinPanel();
     }
@@ -357,94 +368,129 @@ public class MediaPanel {
 
     // ── Jellyfin panel ────────────────────────────────────────────────────
 
+    /**
+     * Jellyfin mode: a collapsible connection form over a three-pane browser.
+     *
+     * <p>The browser is side-by-side rather than the three stacked lists it used
+     * to be. Stacked, the panel needed about 600px of height before any list
+     * showed more than four rows; in columns it is usable at half that, which is
+     * most of why the window can open smaller.
+     */
     private VBox buildJellyfinPanel() {
-        jellyfinPassField.setPromptText("password");
+        VBox browser = buildJellyfinBrowser();
+        VBox panel = new VBox(8, buildJellyfinLoginPane(), browser);
+        panel.setFillWidth(true);
+        VBox.setVgrow(browser, Priority.ALWAYS);
+        return panel;
+    }
+
+    /**
+     * The connection form, collapsed by default once credentials are on file.
+     *
+     * <p>Username/password and API key are two ways to do the same thing, so
+     * only one is on screen: the key field hides behind a disclosure link unless
+     * a key is already stored.
+     */
+    private TitledPane buildJellyfinLoginPane() {
+        jellyfinPassField.setPromptText("Password");
         jellyfinPassField.setMaxWidth(Double.MAX_VALUE);
 
-        jellyfinStatus.getStyleClass().addAll("subhead", "jellyfin-status-pending");
-        jellyfinConnBtn.getStyleClass().add("accent");
+        addOnce(jellyfinStatus, "subhead");
+        addOnce(jellyfinStatus, "jellyfin-status-pending");
+        jellyfinStatus.setWrapText(true);
+
+        addOnce(jellyfinConnBtn, "accent");
         jellyfinConnBtn.setMaxWidth(Double.MAX_VALUE);
         jellyfinConnBtn.setOnAction(e -> handleJellyfinConnect());
         HBox.setHgrow(jellyfinConnBtn, Priority.ALWAYS);
 
-        jellyfinSaveBtn.getStyleClass().add("secondary");
+        addOnce(jellyfinSaveBtn, "secondary");
         jellyfinSaveBtn.setOnAction(e -> savePrefs());
 
-        HBox btnRow = new HBox(8, jellyfinConnBtn, jellyfinSaveBtn);
+        VBox apiKeyRow = rowLabel("API key", jellyfinApiField);
+        boolean hasKey = !jellyfinApiField.getText().trim().isEmpty();
+        setShown(apiKeyRow, hasKey);
+
+        Hyperlink apiKeyToggle = new Hyperlink(hasKey ? "Hide API key" : "Use an API key instead");
+        apiKeyToggle.getStyleClass().add("subhead");
+        apiKeyToggle.setOnAction(e -> {
+            boolean show = !apiKeyRow.isManaged();
+            setShown(apiKeyRow, show);
+            apiKeyToggle.setText(show ? "Hide API key" : "Use an API key instead");
+        });
 
         VBox loginBox = new VBox(8,
                 rowLabel("Server URL", jellyfinUrlField),
                 rowLabel("Username",   jellyfinUserField),
                 rowLabel("Password",   jellyfinPassField),
-                rowLabel("API Key",    jellyfinApiField),
-                btnRow,
+                apiKeyToggle,
+                apiKeyRow,
+                new HBox(8, jellyfinConnBtn, jellyfinSaveBtn),
                 jellyfinStatus);
         loginBox.getStyleClass().add("jellyfin-login");
 
-        // Collapsible wrapper — starts expanded unless we're already
-        // connected (e.g. panel rebuilt after switching modes and back),
-        // in which case it stays out of the way.
-        jellyfinLoginPane = new TitledPane("Jellyfin Connection", loginBox);
+        jellyfinLoginPane = new TitledPane("Jellyfin server", loginBox);
         jellyfinLoginPane.setAnimated(true);
         jellyfinLoginPane.getStyleClass().add("jellyfin-login-pane");
-        jellyfinLoginPane.setExpanded(jellyfinClient == null);
+        // Expanded only when there is nothing to connect with yet. A stored
+        // token reconnects on startup, so the form would just be in the way.
+        jellyfinLoginPane.setExpanded(jellyfinClient == null && !hasKey);
+        return jellyfinLoginPane;
+    }
 
-        showSearchField.setPromptText("Search shows & movies…");
-        if (!showSearchField.getStyleClass().contains("search-field"))
-            showSearchField.getStyleClass().add("search-field");
+    private VBox buildJellyfinBrowser() {
+        addOnce(showSearchField, "search-field");
+        showSearchField.setPromptText("Search shows and movies");
 
-        showsList.setPlaceholder(new Label("Connect to Jellyfin to browse"));
-        showsList.setPrefHeight(100); showsList.setMinHeight(60);
-        VBox.setVgrow(showsList, Priority.ALWAYS);
+        showsList.setPlaceholder(new Label("Connect to browse"));
+        seasonsList.setPlaceholder(new Label("Pick a show"));
+        episodesList.setPlaceholder(new Label("Pick a season"));
+
         showsList.setOnMouseClicked(e -> {
             JellyfinItem sel = showsList.getSelectionModel().getSelectedItem();
             if (sel == null) return;
-            // Movies have no Season/Episode hierarchy in Jellyfin — asking
-            // for seasons on a movie's Id returns nothing (or garbage),
-            // which is why movies could never reach the episode list before.
-            if ("Movie".equals(sel.type())) {
-                selectMovie(sel);
-            } else {
-                loadSeasons(sel.id());
-            }
+            // Movies have no Season/Episode hierarchy in Jellyfin - asking for
+            // seasons on a movie's Id returns nothing, which is why movies
+            // could never reach the episode list before.
+            if ("Movie".equals(sel.type())) selectMovie(sel);
+            else                            loadSeasons(sel.id());
         });
 
-        seasonsList.setPlaceholder(new Label("Select a show above"));
-        seasonsList.setPrefHeight(70); seasonsList.setMinHeight(50);
         seasonsList.setOnMouseClicked(e -> {
             JellyfinItem sel = seasonsList.getSelectionModel().getSelectedItem();
             if (sel != null) loadEpisodes(sel.id());
         });
 
-        episodesList.setPlaceholder(new Label("Select a season above"));
-        episodesList.setPrefHeight(100); episodesList.setMinHeight(60);
-        VBox.setVgrow(episodesList, Priority.ALWAYS);
-
-        if (!launchJfBtn.getStyleClass().contains("green")) launchJfBtn.getStyleClass().add("green");
+        addOnce(launchJfBtn, "green");
         launchJfBtn.setMaxWidth(Double.MAX_VALUE);
-        launchJfBtn.setDisable(true);
+        launchJfBtn.setDisable(episodesList.getSelectionModel().getSelectedItem() == null);
         launchJfBtn.setOnAction(e -> handleJellyfinLaunch());
+        HBox.setHgrow(launchJfBtn, Priority.ALWAYS);
 
-        nextJfBtn.setMaxWidth(Double.MAX_VALUE);
-        nextJfBtn.setDisable(true);
         nextJfBtn.setOnAction(e -> handleNextEpisode(true));
 
-        episodesList.getSelectionModel().selectedItemProperty()
-                .addListener((obs, old, now) -> launchJfBtn.setDisable(now == null));
+        HBox panes = new HBox(8,
+                listColumn("Shows & movies", showsList),
+                listColumn("Seasons",        seasonsList),
+                listColumn("Episodes",       episodesList));
+        panes.setFillHeight(true);
+        VBox.setVgrow(panes, Priority.ALWAYS);
 
-        VBox browserBox = new VBox(6,
-                sectionLabel("Shows / Movies"), showSearchField, showsList,
-                sectionLabel("Seasons"),        seasonsList,
-                sectionLabel("Episodes"),       episodesList,
-                launchJfBtn, nextJfBtn);
-        browserBox.setFillWidth(true);
-        VBox.setVgrow(showsList, Priority.ALWAYS);
-        VBox.setVgrow(episodesList, Priority.ALWAYS);
+        VBox box = new VBox(8, showSearchField, panes, new HBox(8, launchJfBtn, nextJfBtn));
+        box.setFillWidth(true);
+        return box;
+    }
 
-        VBox panel = new VBox(10, jellyfinLoginPane, browserBox);
-        panel.setFillWidth(true);
-        VBox.setVgrow(browserBox, Priority.ALWAYS);
-        return panel;
+    /** One pane of the three-pane browser: a small caption over its list. */
+    private VBox listColumn(String title, ListView<JellyfinItem> list) {
+        list.setMinHeight(110);
+        list.setPrefHeight(240);
+        VBox col = new VBox(4, sectionLabel(title), list);
+        col.setFillWidth(true);
+        col.setMinWidth(104);
+        VBox.setVgrow(list, Priority.ALWAYS);
+        HBox.setHgrow(col, Priority.ALWAYS);
+        return col;
     }
 
     // ── Local file panel ──────────────────────────────────────────────────
@@ -476,12 +522,11 @@ public class MediaPanel {
         localFileField.setMaxWidth(Double.MAX_VALUE);
         localFileField.setPromptText("Click Browse to pick a file…");
 
-        if (!launchLocalBtn.getStyleClass().contains("green")) launchLocalBtn.getStyleClass().add("green");
+        addOnce(launchLocalBtn, "green");
         launchLocalBtn.setMaxWidth(Double.MAX_VALUE);
         launchLocalBtn.setOnAction(e -> handleLocalLaunch());
+        HBox.setHgrow(launchLocalBtn, Priority.ALWAYS);
 
-        nextLocalBtn.setMaxWidth(Double.MAX_VALUE);
-        nextLocalBtn.setDisable(true);
         nextLocalBtn.setOnAction(e -> handleNextEpisode(false));
 
         playlistLabel.getStyleClass().add("subhead");
@@ -503,10 +548,10 @@ public class MediaPanel {
         hint.setWrapText(true);
         hint.getStyleClass().add("subhead");
 
-        VBox panel = new VBox(12,
-                sectionLabel("Select local media file"),
+        VBox panel = new VBox(10,
+                sectionLabel("Local media file"),
                 fileRow, playlistLabel, hint,
-                launchLocalBtn, nextLocalBtn);
+                new HBox(8, launchLocalBtn, nextLocalBtn));
         panel.setFillWidth(true);
         panel.setAlignment(Pos.TOP_LEFT);
         return panel;
@@ -690,7 +735,7 @@ public class MediaPanel {
         String key  = jellyfinApiField.getText().trim();
 
         jellyfinConnBtn.setDisable(true);
-        setJellyfinStatus("⏳ Connecting…", "pending");
+        setJellyfinStatus("Connecting...", "pending");
 
         Async.run("jellyfin-auth", () -> {
             jellyfinClient = new JellyfinClient(url);
@@ -714,16 +759,22 @@ public class MediaPanel {
                     allShowItems.setAll(shows);
                     allShowItems.addAll(movies);
                     applyShowFilter(showSearchField.getText());
-                    setJellyfinStatus("✓ Connected — " + (shows.size() + movies.size()) + " items", "ok");
-                    jellyfinConnBtn.setText("Connected ✓");
+                    setJellyfinStatus("Connected — " + (shows.size() + movies.size()) + " items", "ok");
+                    jellyfinConnBtn.setText("Connected");
                     // Free up vertical space now that we're connected —
                     // collapse the login form so the browser gets more room.
                     if (jellyfinLoginPane != null) jellyfinLoginPane.setExpanded(false);
                 });
             } else {
+                // Report what the server actually said. Jellyfin 12 answers 400
+                // to a login it cannot attribute to a device, which is
+                // indistinguishable from a bad password in a generic message.
+                final String reason = jellyfinClient.getLastError();
                 Platform.runLater(() -> {
-                    setJellyfinStatus("✗ Connection failed — check URL / credentials", "error");
+                    setJellyfinStatus(reason == null ? "Connection failed" : reason, "error");
                     jellyfinConnBtn.setDisable(false);
+                    jellyfinConnBtn.setText("Connect to Jellyfin");
+                    if (jellyfinLoginPane != null) jellyfinLoginPane.setExpanded(true);
                 });
             }
         });
@@ -861,6 +912,23 @@ public class MediaPanel {
         lbl.getStyleClass().add("muted");
         control.setMaxWidth(Double.MAX_VALUE);
         return new VBox(3, lbl, control);
+    }
+
+    /**
+     * Adds a style class only if it is missing.
+     *
+     * <p>The widgets here are long-lived fields while the panels around them are
+     * rebuilt on every mode switch, so an unguarded add would append the same
+     * class again on each pass.
+     */
+    private static void addOnce(javafx.scene.Node node, String styleClass) {
+        if (!node.getStyleClass().contains(styleClass)) node.getStyleClass().add(styleClass);
+    }
+
+    /** Shows or hides a node, and stops a hidden one reserving layout space. */
+    private static void setShown(javafx.scene.Node node, boolean shown) {
+        node.setVisible(shown);
+        node.setManaged(shown);
     }
 
     private Label sectionLabel(String text) {
