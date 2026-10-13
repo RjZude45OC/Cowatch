@@ -421,6 +421,14 @@ public class SyncEngine {
     /** Media length in seconds, or -1 until mpv reports one. */
     public double getDuration() { return mediaDuration; }
 
+    // ── Debug console readouts ────────────────────────────────────
+
+    public boolean isPaused()          { return paused; }
+    public double  getOffset()         { return offsetSeconds; }
+    /** True while a remote command is being applied and mpv's echo is ignored. */
+    public boolean isSuppressing()     { return suppressMpvEvents.get(); }
+    public boolean isInQuietPeriod()   { return inStartupWindow(); }
+
     // ── Offset ────────────────────────────────────────────────────
 
     public void setOffset(double seconds) {
