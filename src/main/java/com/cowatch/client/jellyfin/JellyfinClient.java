@@ -201,6 +201,81 @@ public class JellyfinClient {
     public List<JellyfinItem> getEpisodes(String seasonId) { return fetchItems("Episode", seasonId); }
     public List<JellyfinItem> getMovies() { return fetchItems("Movie", ""); }
 
+    /** Every episode of a series, across all its seasons. */
+    public List<JellyfinItem> getSeriesEpisodes(String seriesId) { return fetchItems("Episode", seriesId); }
+
+    /**
+     * Finds the series in this library that an AniList entry refers to.
+     *
+     * <p>Tries, in order, an AniList provider id (set by Jellyfin's AniList
+     * plugin), the TVDB id (what Jellyfin's default metadata uses, and what
+     * AniZip maps AniList entries to), then an exact title match.
+     *
+     * @param anilistId AniList media id
+     * @param tvdbId    the TVDB series id AniZip maps it to, or 0 if unknown
+     * @param titles    titles to fall back on, compared ignoring case and punctuation
+     * @return the series, or null if nothing matched
+     */
+    public JellyfinItem findSeries(int anilistId, int tvdbId, Collection<String> titles) {
+        if (userId == null || userId.isEmpty()) return null;
+        try {
+            HttpResponse<String> res = get("/Items?userId=" + enc(userId)
+                    + "&IncludeItemTypes=Series&Recursive=true"
+                    + "&Fields=ProviderIds,ProductionYear");
+            if (res.statusCode() != 200) {
+                log.warning("findSeries returned HTTP " + res.statusCode());
+                return null;
+            }
+            JSONArray items = new JSONObject(res.body()).optJSONArray("Items");
+            if (items == null) return null;
+
+            Set<String> wanted = new HashSet<>();
+            for (String t : titles) if (t != null && !t.isBlank()) wanted.add(titleKey(t));
+
+            JSONObject byTvdb = null, byTitle = null;
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject obj = items.getJSONObject(i);
+                JSONObject ids = obj.optJSONObject("ProviderIds");
+                if (ids != null) {
+                    if (String.valueOf(anilistId).equals(providerId(ids, "AniList"))) return toItem(obj);
+                    if (tvdbId > 0 && byTvdb == null
+                            && String.valueOf(tvdbId).equals(providerId(ids, "Tvdb"))) byTvdb = obj;
+                }
+                if (byTitle == null && wanted.contains(titleKey(obj.optString("Name")))) byTitle = obj;
+            }
+            JSONObject hit = byTvdb != null ? byTvdb : byTitle;
+            return hit == null ? null : toItem(hit);
+        } catch (Exception e) {
+            log.warning("findSeries failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** Provider ids are keyed by name, with casing that differs between plugins. */
+    private static String providerId(JSONObject ids, String name) {
+        for (String key : ids.keySet()) {
+            if (key.equalsIgnoreCase(name)) return ids.optString(key, "").trim();
+        }
+        return "";
+    }
+
+    /** Lowercase letters and digits only, so "Re:Zero" and "Re Zero" compare equal. */
+    public static String titleKey(String title) {
+        return title == null ? "" : title.toLowerCase(Locale.ROOT).replaceAll("[^\\p{L}\\p{N}]", "");
+    }
+
+    private static JellyfinItem toItem(JSONObject obj) {
+        return new JellyfinItem(
+                obj.optString("Id"),
+                obj.optString("Name"),
+                obj.optString("Type"),
+                obj.optString("Overview", ""),
+                obj.optInt("ProductionYear", 0),
+                obj.optInt("IndexNumber", 0),
+                obj.optInt("ParentIndexNumber", 0),
+                obj.optString("SeriesName", ""));
+    }
+
     /**
      * Fetches one item type, optionally restricted to a parent.
      *
@@ -234,17 +309,7 @@ public class JellyfinClient {
             List<JellyfinItem> result = new ArrayList<>();
 
             for (int i = 0; i < items.length(); i++) {
-                JSONObject obj = items.getJSONObject(i);
-                result.add(new JellyfinItem(
-                        obj.optString("Id"),
-                        obj.optString("Name"),
-                        obj.optString("Type"),
-                        obj.optString("Overview", ""),
-                        obj.optInt("ProductionYear", 0),
-                        obj.optInt("IndexNumber", 0),
-                        obj.optInt("ParentIndexNumber", 0),
-                        obj.optString("SeriesName", "")
-                ));
+                result.add(toItem(items.getJSONObject(i)));
             }
             return result;
 

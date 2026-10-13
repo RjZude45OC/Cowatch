@@ -6,6 +6,7 @@ import com.cowatch.client.network.ServerConnection;
 import com.cowatch.client.sync.SyncEngine;
 import com.cowatch.client.ui.controllers.*;
 import com.cowatch.client.util.Async;
+import org.json.JSONObject;
 
 import javafx.application.Platform;
 import javafx.geometry.Insets;
@@ -18,6 +19,7 @@ import java.net.URL;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 /**
@@ -60,6 +62,14 @@ public class MainWindow {
 
     private boolean chatShown = false;
     private boolean sideBySide = true;
+
+    /**
+     * Bumped by every launch and attach. A waiter for a player that has since
+     * been replaced - opening the episode someone else started, say - sees a
+     * newer number when its player exits and leaves the UI alone, instead of
+     * reporting the new player closed.
+     */
+    private final AtomicInteger playerGeneration = new AtomicInteger();
 
     /** Serialises mpv IPC commands so UI clicks never block the FX thread. */
     private final ExecutorService mpvExecutor =
@@ -228,6 +238,7 @@ public class MainWindow {
                     chatPanel.appendMessage(msg);
                     noteChatActivity();
                 }));
+        server.addMessageHandler(this::onServerMedia);
 
         server.joinRoom(config.roomId, config.username);
         headerBar.setConnected(config.serverHost, config.roomId);
@@ -260,8 +271,44 @@ public class MainWindow {
         systemMessage("Lost the connection to the server. Reconnect from Settings.");
     }
 
+    /**
+     * Someone in the room started an episode. Opens the same one here, from
+     * this viewer's own source, when following the room is switched on.
+     *
+     * <p>Runs on the server reader thread; the age of the frame is worked out
+     * here, at receipt, so later delays opening the episode are measured on
+     * this machine's clock rather than compared against the server's.
+     */
+    private void onServerMedia(String raw) {
+        if (raw.isBlank() || !raw.contains("\"media\"")) return;
+        try {
+            JSONObject msg = new JSONObject(raw);
+            if (!"media".equals(msg.optString("event"))) return;
+            int anilistId = msg.optInt("anilistId", 0);
+            int episode   = msg.optInt("episode", 0);
+            if (anilistId <= 0 || episode <= 0) return;
+
+            boolean paused   = msg.optBoolean("paused", true);
+            double  position = Math.max(0, msg.optDouble("position", 0));
+            long    now      = System.currentTimeMillis();
+            if (!paused) {
+                // Same transit allowance as play and seek frames get.
+                double age = (now - msg.optLong("serverTime", now)) / 1000.0;
+                position += Math.max(0, Math.min(age, 5.0));
+            }
+            MediaPanel.PeerMedia peer = new MediaPanel.PeerMedia(anilistId, episode,
+                    msg.optString("title", ""), msg.optString("from", "someone"),
+                    position, paused, now);
+            Platform.runLater(() -> {
+                if (configPanel.isFollowRoom()) mediaPanel.followPeer(peer);
+            });
+        } catch (Exception e) {
+            // Chat already shows the raw frame; nothing to open.
+        }
+    }
+
     /** Logs an app event to the chat transcript and flags it if chat is hidden. */
-    private void systemMessage(String text) {
+    public void systemMessage(String text) {
         chatPanel.appendRaw("[system] " + text);
         noteChatActivity();
     }
@@ -300,6 +347,7 @@ public class MainWindow {
      * @param okMessage chat line shown when the launch succeeds
      */
     private void launch(Supplier<String> starter, String okMessage) {
+        final int generation = playerGeneration.incrementAndGet();
         Async.run("mpv-launcher", () -> {
             String error = starter.get();
             Platform.runLater(() -> {
@@ -319,6 +367,7 @@ public class MainWindow {
                     Thread.currentThread().interrupt();
                     return;
                 }
+                if (generation != playerGeneration.get()) return;   // replaced, not closed
                 Platform.runLater(this::onMpvClosed);
             }
         });
@@ -338,11 +387,25 @@ public class MainWindow {
      *                   thread; the first that answers wins
      */
     public void onAttachToSeanime(Supplier<List<String>> candidates) {
+        onAttachToSeanime(candidates, false);
+    }
+
+    /**
+     * @param quiet true for an attach cowatch started on its own, on seeing
+     *              Seanime open a player: a failure is logged, not shown in a
+     *              dialog, since nobody asked for it and it will be retried
+     */
+    public void onAttachToSeanime(Supplier<List<String>> candidates, boolean quiet) {
         // Attaching mid-episode reports mpv's current state as if it had just
         // changed. Nobody pressed anything, so the room must not hear about it.
         syncEngine.beginQuietPeriod();
+        final int generation = playerGeneration.incrementAndGet();
         Async.run("seanime-attach", () -> {
             List<String> socketPaths = candidates.get();
+            if (quiet && socketPaths.isEmpty()) {
+                Platform.runLater(() -> mediaPanel.onSeanimeAttached(false));
+                return;
+            }
             String found = socketPaths.isEmpty()
                     ? "No Seanime player is running." + System.lineSeparator() + System.lineSeparator()
                       + "Start the episode in Seanime first, with mpv as its media player, "
@@ -359,6 +422,9 @@ public class MainWindow {
                 if (ok) {
                     playbackControls.setEnabled(true);
                     systemMessage("Attached to the mpv window Seanime opened");
+                } else if (quiet) {
+                    java.util.logging.Logger.getLogger(MainWindow.class.getName())
+                            .fine("Automatic Seanime attach failed: " + error);
                 } else {
                     showError("Could not attach to Seanime playback", error);
                 }
@@ -371,6 +437,7 @@ public class MainWindow {
                 Thread.currentThread().interrupt();
                 return;
             }
+            if (generation != playerGeneration.get()) return;   // replaced, not closed
             Platform.runLater(() -> {
                 playbackControls.setEnabled(false);
                 systemMessage("Seanime's mpv window closed");
@@ -388,7 +455,8 @@ public class MainWindow {
      */
     public void announceMedia(int anilistId, int episode, String title, String source) {
         if (!server.isConnected()) return;
-        server.sendMedia(anilistId, episode, title, source);
+        server.sendMedia(anilistId, episode, title, source,
+                syncEngine.getRemotePosition(), syncEngine.isPaused());
     }
 
     // --- Next episode (IPC only) ------------------------------------------
@@ -413,6 +481,9 @@ public class MainWindow {
     public void setNowPlaying(String show, String episode) {
         playbackControls.setNowPlaying(show, episode);
     }
+
+    /** True while an mpv window, launched or attached, is open. */
+    public boolean isPlayerOpen() { return mpv.isRunning(); }
 
     // --- Panel accessors --------------------------------------------------
 

@@ -18,7 +18,8 @@ import java.util.Properties;
  * Sections:
  *  1. Sync mode selector
  *  2. Connection card: host, port, username  (room removed — server handles rooms)
- *  3. Playback: whether mpv starts playing or opens paused
+ *  3. Playback: whether mpv starts playing or opens paused, and whether
+ *     this client opens the episodes others in the room start
  *  4. Connect + Save buttons
  * Settings are persisted via {@link AppPrefs}, in the platform's per-user
  * configuration directory.
@@ -38,6 +39,9 @@ public class ConfigPanel {
     private final TextField userField = field("User1");
 
     private final ComboBox<StartBehavior> startBox = new ComboBox<>();
+
+    /** On by default: following the room is the point of joining one. */
+    private final CheckBox followBox = new CheckBox("Open what others in the room play");
 
     private final Button connectBtn = new Button("Connect");
     private final Button saveBtn    = new Button("Save");
@@ -99,10 +103,19 @@ public class ConfigPanel {
         startHint.getStyleClass().add("muted");
         startHint.setWrapText(true);
 
+        followBox.setWrapText(true);
+        Label followHint = new Label("When someone starts an episode, cowatch opens the same "
+                + "one from your Jellyfin, local folder or Seanime library and jumps to "
+                + "where they are.");
+        followHint.getStyleClass().add("muted");
+        followHint.setWrapText(true);
+
         VBox playCard = card(
                 heading("Playback"),
                 labeled("When mpv opens", startBox),
-                startHint);
+                startHint,
+                followBox,
+                followHint);
 
         // ── 4. Action row: Connect + Save ─────────────────────────────
         connectBtn.getStyleClass().add("accent");
@@ -169,6 +182,9 @@ public class ConfigPanel {
         StartBehavior b = startBox.getValue();
         return b != null ? b : StartBehavior.AUTO;
     }
+    /** Whether to open the episode someone else in the room starts. */
+    public boolean isFollowRoom() { return followBox.isSelected(); }
+
     public void onDisconnected() { connectBtn.setDisable(false); connectBtn.setText("Connect"); }
 
     // ── Preferences persistence ───────────────────────────────────────────
@@ -180,6 +196,7 @@ public class ConfigPanel {
         p.setProperty("username", userField.getText().trim());
         p.setProperty("mode",     selectedMode.name());
         p.setProperty("start",    getStartBehavior().name());
+        p.setProperty("follow",   String.valueOf(followBox.isSelected()));
 
         try {
             AppPrefs.save(PREFS_FILE, p, "cowatch settings");
@@ -199,6 +216,7 @@ public class ConfigPanel {
         } catch (IllegalArgumentException ignored) {
             // Unknown mode in an older or hand-edited file — keep the default.
         }
+        followBox.setSelected(!"false".equals(p.getProperty("follow", "true")));
         try {
             startBox.setValue(StartBehavior.valueOf(p.getProperty("start", "AUTO")));
         } catch (IllegalArgumentException ignored) {

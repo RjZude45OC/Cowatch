@@ -181,6 +181,27 @@ public class AniZipClient {
         }
     }
 
+    /**
+     * Everything AniZip knows about one AniList entry: {@code titles},
+     * {@code episodes} (keyed by AniList episode number, each with a TVDB
+     * season and episode and an absolute number) and {@code mappings} (other
+     * sites' ids, including {@code thetvdb_id}).
+     *
+     * <p>This is what turns an episode someone else announced into a file in
+     * this viewer's own library.
+     *
+     * @return the whole response, or null on failure
+     */
+    public JSONObject fetchShow(int anilistId) {
+        try {
+            String body = get(BASE + "/episodes?anilist_id=" + anilistId);
+            return body == null ? null : new JSONObject(body);
+        } catch (Exception e) {
+            log.warning("AniZip fetchShow failed for " + anilistId + ": " + e.getMessage());
+            return null;
+        }
+    }
+
     // ─── Raw fetch ────────────────────────────────────────────────────────
 
     /**

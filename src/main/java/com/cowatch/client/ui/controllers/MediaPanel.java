@@ -30,6 +30,8 @@ import java.util.logging.Logger;
 import java.util.stream.*;
 import java.util.Properties;
 
+import org.json.JSONObject;
+
 import com.dgtlrepublic.anitomyj.AnitomyJ;
 import com.dgtlrepublic.anitomyj.Element;
 import com.dgtlrepublic.anitomyj.Element.ElementCategory;
@@ -45,6 +47,24 @@ public class MediaPanel {
 
     /** Result of parsing a local filename via AnitomyJ. */
     private record ParsedInfo(String title, int episode) {}
+
+    /**
+     * An episode someone else in the room started, for this client to open too.
+     *
+     * @param position     their position, in the room's timeline, at receivedAtMs
+     * @param paused       whether they were paused
+     * @param receivedAtMs when the announcement arrived, by this machine's clock
+     */
+    public record PeerMedia(int anilistId, int episode, String title, String from,
+                            double position, boolean paused, long receivedAtMs) {
+        String key() { return anilistId + ":" + episode; }
+    }
+
+    /** How often to look for a Seanime player to attach to, while there is none. */
+    private static final long SEANIME_WATCH_MS = 2_000;
+
+    /** How many folders next to the last local file to search when following. */
+    private static final int MAX_LOCAL_DIRS = 200;
 
     private final MainWindow  owner;
     private final AniZipClient aniZip = new AniZipClient();
@@ -114,6 +134,31 @@ public class MediaPanel {
 
     /** "anilistId:episode" last sent to the room, so each episode is announced once. */
     private String lastAnnouncedKey = "";
+
+    /**
+     * "anilistId:episode" of what this client is playing, when known. An
+     * announcement for the episode already on screen is not followed, which is
+     * also what stops two clients bouncing the same episode back and forth.
+     */
+    private String playingKey = "";
+
+    /**
+     * True while the player was opened to follow someone else. That launch is
+     * not announced: this side's library may resolve the episode to a slightly
+     * different AniList entry, and announcing that would send the room after it.
+     */
+    private boolean followLaunch = false;
+
+    /** For AniList id lookups when no tracking token is set; search is public. */
+    private final AniListClient publicAniList = new AniListClient("");
+
+    // Automatic Seanime attach
+    private boolean seanimeAttaching = false;
+    private List<String> lastTriedSockets   = List.of();
+    private List<String> lastFailedSockets  = List.of();
+    private final ScheduledExecutorService seanimeWatcher =
+            Executors.newSingleThreadScheduledExecutor(Async.namedDaemonFactory("seanime-watch"));
+    private ScheduledFuture<?> seanimeWatchTask;
 
     // ── Local file widgets ────────────────────────────────────────────────
     private final TextField localFileField    = field("No file selected");
@@ -380,6 +425,7 @@ public class MediaPanel {
         resetWatchedTrackingForNewEpisode();
 
         updatePlaylistLabels(isJellyfin);
+        announceCurrent(isJellyfin);
 
         if (isJellyfin) { launchJfBtn.setDisable(true); launchJfBtn.setText("Launching…"); }
         else             { launchLocalBtn.setDisable(true); launchLocalBtn.setText("Launching…"); }
@@ -421,7 +467,10 @@ public class MediaPanel {
 
         reportedThisEpisode.set(false); // syncEngine already reset its own latch for this transition
 
-        Platform.runLater(() -> updatePlaylistLabels(isJellyfin));
+        Platform.runLater(() -> {
+            updatePlaylistLabels(isJellyfin);
+            announceCurrent(isJellyfin);
+        });
     }
 
     private void resetWatchedTrackingForNewEpisode() {
@@ -636,7 +685,9 @@ public class MediaPanel {
         List<String> playlist = buildLocalPlaylist(file);
         int startIndex        = findIndex(playlist, file.getAbsolutePath());
         currentLocalFile      = file.getAbsolutePath();
+        followLaunch          = false;
         launchPlaylist(playlist, startIndex, false);
+        announceLocalFile(currentLocalFile);
     }
 
     public void onMpvLaunched(boolean success) {
@@ -656,6 +707,9 @@ public class MediaPanel {
 
     public void onMpvClosed(boolean success) {
         if (progressTask != null) { progressTask.cancel(false); progressTask = null; }
+        playingKey       = "";
+        lastAnnouncedKey = "";
+        followLaunch     = false;
 
         launchLocalBtn.setText("▶  Launch in MPV"); launchLocalBtn.setDisable(false);
         launchJfBtn.setText("▶  Launch in MPV");
@@ -886,10 +940,18 @@ public class MediaPanel {
     private void handleJellyfinLaunch() {
         JellyfinItem selected = episodesList.getSelectionModel().getSelectedItem();
         if (selected == null || jellyfinClient == null) return;
+        followLaunch = false;
+        startJellyfin(new ArrayList<>(episodesList.getItems()), selected);
+    }
 
+    /**
+     * Plays {@code selected} with the rest of {@code episodes} queued behind it,
+     * and reports the session to Jellyfin.
+     */
+    private void startJellyfin(List<JellyfinItem> episodes, JellyfinItem selected) {
         // Store full episode list — currentIndex tracks which ep is playing
         // as MPV advances through the playlist via playlist-next
-        jfEpisodeList = new ArrayList<>(episodesList.getItems());
+        jfEpisodeList = new ArrayList<>(episodes);
         List<String> urls = jfEpisodeList.stream()
                 .map(ep -> jellyfinClient.getStreamUrl(ep.id()))
                 .collect(Collectors.toList());
@@ -928,8 +990,8 @@ public class MediaPanel {
      * lookup would be much worse.
      */
     private void announceJellyfinEpisode(JellyfinItem item) {
-        AniListClient aniList = owner.getTrackingPanel().getAniListClient();
-        if (aniList == null || !aniList.hasToken()) return;
+        if (followLaunch) return;
+        AniListClient aniList = aniListForLookup();
 
         Async.run("jellyfin-announce", () -> {
             String searchTitle = item.seriesName().isBlank() ? item.name() : item.seriesName();
@@ -941,9 +1003,57 @@ public class MediaPanel {
             int relativeEp = aniZip.resolveJellyfinEpisode(
                     anilistId, item.seasonNumber(), item.episodeNumber());
             final int episode = relativeEp > 0 ? relativeEp : item.episodeNumber();
-            Platform.runLater(() ->
-                    owner.announceMedia(anilistId, episode, searchTitle, "jellyfin"));
+            Platform.runLater(() -> announce(anilistId, episode, searchTitle, "jellyfin"));
         });
+    }
+
+    /**
+     * Tells the room which local file this client just started.
+     *
+     * <p>Same idea as {@link #announceJellyfinEpisode}: the title and episode
+     * come from the filename, the AniList id from a search, and AniZip folds
+     * absolute numbering back into the season's own.
+     */
+    private void announceLocalFile(String path) {
+        if (followLaunch || path == null || path.isBlank()) return;
+        AniListClient aniList = aniListForLookup();
+        Async.run("local-announce", () -> {
+            ParsedInfo info = parseFilename(path);
+            if (info.title().isBlank()) return;
+            int anilistId = aniList.searchMediaId(info.title());
+            if (anilistId <= 0) {
+                log.info("Not announcing: no AniList match for '" + info.title() + "'");
+                return;
+            }
+            int episode = aniZip.resolveAbsoluteEpisode(anilistId, info.episode(), 0);
+            Platform.runLater(() -> announce(anilistId, episode, info.title(), "local"));
+        });
+    }
+
+    /** Announces whatever the playlist has moved on to. */
+    private void announceCurrent(boolean isJellyfin) {
+        // An advance is this viewer's own doing, even in a followed playlist.
+        followLaunch = false;
+        if (isJellyfin) {
+            if (currentIndex < jfEpisodeList.size()) announceJellyfinEpisode(jfEpisodeList.get(currentIndex));
+        } else {
+            announceLocalFile(currentLocalFile);
+        }
+    }
+
+    /** Sends an announcement once per episode, and remembers it as what is playing. */
+    private void announce(int anilistId, int episode, String title, String source) {
+        String key = anilistId + ":" + episode;
+        playingKey = key;
+        if (key.equals(lastAnnouncedKey)) return;
+        lastAnnouncedKey = key;
+        owner.announceMedia(anilistId, episode, title, source);
+    }
+
+    /** The tracking client when there is one, else a token-less one for search. */
+    private AniListClient aniListForLookup() {
+        AniListClient tracking = owner.getTrackingPanel().getAniListClient();
+        return tracking != null ? tracking : publicAniList;
     }
 
     // ── Preferences ───────────────────────────────────────────────────────
@@ -1091,10 +1201,11 @@ public class MediaPanel {
         addOnce(nowPlayingLabel, "now-playing");
 
         Label hint = new Label(
-                "Play the episode in Seanime with mpv as its media player, then press "
-              + "Attach. cowatch joins that mpv window, so play, pause and seek stay in "
+                "Play the episode in Seanime with mpv as its media player. cowatch joins "
+              + "that mpv window as soon as it opens, so play, pause and seek stay in "
               + "sync whichever side presses them, and tells the room which episode it "
-              + "is. Seanime keeps updating AniList itself.");
+              + "is. The button is there if it ever misses one. Seanime keeps updating "
+              + "AniList itself.");
         hint.setWrapText(true);
         hint.getStyleClass().add("subhead");
 
@@ -1135,6 +1246,7 @@ public class MediaPanel {
                 seanimeConnBtn.setDisable(false);
                 if (error != null) {
                     stopSeanimeEvents();
+                    stopSeanimeWatch();
                     seanimeClient = null;
                     seanimeLibrary = Map.of();
                     attachBtn.setDisable(true);
@@ -1153,6 +1265,7 @@ public class MediaPanel {
                 seanimeConnBtn.setText("Reconnect");
                 savePrefs(null);
                 startSeanimeEvents(client);
+                startSeanimeWatch();
 
                 String who = client.getUserName().isEmpty() ? "" : " as " + client.getUserName();
                 String ver = client.getVersion().isEmpty() ? "" : " (Seanime " + client.getVersion() + ")";
@@ -1166,10 +1279,11 @@ public class MediaPanel {
                     if (seanimeConnPane != null) seanimeConnPane.setExpanded(true);
                 } else {
                     String socket = client.usesAutoSocket()
-                            ? "finds Seanime's mpv automatically"
-                            : "uses mpv socket " + client.getMpvSocket();
+                            ? ""
+                            : " on mpv socket " + client.getMpvSocket();
                     setSeanimeStatus("Connected" + who + ver + ". " + files
-                            + " in the library; attaching " + socket + ".", "ok");
+                            + " in the library. cowatch joins Seanime's mpv" + socket
+                            + " as soon as it opens.", "ok");
                     if (seanimeConnPane != null) seanimeConnPane.setExpanded(false);
                 }
             });
@@ -1210,19 +1324,74 @@ public class MediaPanel {
         if (seanimeClient == null) return;
         final SeanimeClient client = seanimeClient;
 
+        seanimeAttaching = true;
+        lastTriedSockets = List.of();
         attachBtn.setDisable(true);
         attachBtn.setText("Attaching...");
         owner.onAttachToSeanime(client::mpvSocketCandidates);
     }
 
+    /**
+     * Attaches to Seanime's player without a click, as soon as one exists.
+     *
+     * <p>Seanime names each player's socket afresh, so this keeps looking until
+     * one appears: on a timer, and straight away when Seanime's event stream
+     * says playback started. A set of sockets that already failed is not tried
+     * again until it changes, so a stale socket file does not mean a connection
+     * attempt every couple of seconds.
+     *
+     * @param sockets the candidates to try, found off the FX thread
+     * @param retryFailed true to try even a set that failed last time, for when
+     *                    Seanime has just said a new player started
+     */
+    private void autoAttachSeanime(List<String> sockets, boolean retryFailed) {
+        if (seanimeClient == null || currentMode != SyncMode.SEANIME) return;
+        if (seanimeAttached || seanimeAttaching || !seanimeClient.usesExternalMpv()) return;
+        if (sockets.isEmpty()) return;
+        if (!retryFailed && sockets.equals(lastFailedSockets)) return;
+
+        seanimeAttaching = true;
+        lastTriedSockets = sockets;
+        attachBtn.setDisable(true);
+        attachBtn.setText("Attaching...");
+        owner.onAttachToSeanime(() -> sockets, true);
+    }
+
+    /** Looks for Seanime's player in the background while connected. */
+    private void startSeanimeWatch() {
+        stopSeanimeWatch();
+        final SeanimeClient client = seanimeClient;
+        seanimeWatchTask = seanimeWatcher.scheduleWithFixedDelay(() -> {
+            if (seanimeAttached || seanimeAttaching || currentMode != SyncMode.SEANIME) return;
+            List<String> sockets = client.mpvSocketCandidates();
+            if (sockets.isEmpty()) return;
+            Platform.runLater(() -> {
+                if (seanimeClient == client) autoAttachSeanime(sockets, false);
+            });
+        }, 0, SEANIME_WATCH_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private void stopSeanimeWatch() {
+        if (seanimeWatchTask != null) {
+            seanimeWatchTask.cancel(false);
+            seanimeWatchTask = null;
+        }
+    }
+
     /** Called by MainWindow once an attach attempt has finished, or the player closed. */
     public void onSeanimeAttached(boolean success) {
-        seanimeAttached = success;
+        boolean wasAttempt = seanimeAttaching;
+        seanimeAttaching = false;
+        seanimeAttached  = success;
         attachBtn.setText(success ? "Attached to Seanime's mpv" : "Attach to Seanime playback");
         attachBtn.setDisable(success || seanimeClient == null);
-        if (!success) {
+        if (success) {
+            lastFailedSockets = List.of();
+        } else {
+            if (wasAttempt) lastFailedSockets = lastTriedSockets;
             nowPlayingLabel.setText("");
             lastAnnouncedKey = "";
+            playingKey       = "";
         }
     }
 
@@ -1253,6 +1422,17 @@ public class MediaPanel {
     private void onSeanimePlayback(SeanimeEvents.Playback playback) {
         if (currentMode != SyncMode.SEANIME) return;
         announceSeanime(playback.anilistId(), playback.episode(), playback.title(), playback.filename());
+
+        // A player has just opened. Find its socket off the FX thread.
+        if (!seanimeAttached && !seanimeAttaching && seanimeClient != null) {
+            final SeanimeClient client = seanimeClient;
+            Async.run("seanime-find-player", () -> {
+                List<String> sockets = client.mpvSocketCandidates();
+                Platform.runLater(() -> {
+                    if (seanimeClient == client) autoAttachSeanime(sockets, true);
+                });
+            });
+        }
     }
 
     /**
@@ -1268,10 +1448,7 @@ public class MediaPanel {
                 + "  ·  Episode " + episode);
         owner.setNowPlaying(name.isBlank() ? "AniList " + anilistId : name, "Episode " + episode);
 
-        String key = anilistId + ":" + episode;
-        if (key.equals(lastAnnouncedKey)) return;
-        lastAnnouncedKey = key;
-        owner.announceMedia(anilistId, episode, name, "seanime");
+        announce(anilistId, episode, name, "seanime");
     }
 
     /**
@@ -1301,9 +1478,265 @@ public class MediaPanel {
         seanimeStatus.getStyleClass().add("jellyfin-status-" + state);
     }
 
+    // --- Following the room -----------------------------------------------
+
+    /**
+     * Opens the episode someone else in the room started, from this viewer's
+     * own source, and lines it up with where they are.
+     *
+     * <p>Each source resolves the AniList id its own way: Jellyfin by the TVDB
+     * id or AniList id on its series, a local folder by the titles in the
+     * filenames, Seanime by its own library. The position is applied once the
+     * file has loaded (see {@link SyncEngine#joinAt}).
+     *
+     * <p>Called on the FX thread.
+     */
+    public void followPeer(PeerMedia peer) {
+        String key = peer.key();
+        if (key.equals(playingKey) && owner.isPlayerOpen()) {
+            log.info("Already playing " + key + "; not following " + peer.from());
+            return;
+        }
+        String what = (peer.title().isBlank() ? "AniList " + peer.anilistId() : peer.title())
+                + " episode " + peer.episode();
+        owner.systemMessage("Opening " + what + ", which " + peer.from() + " started");
+
+        playingKey = key;
+        // Seanime will report this episode back once it opens it; the room
+        // already knows.
+        lastAnnouncedKey = key;
+        if (syncEngine != null) syncEngine.joinAt(peer.position(), peer.receivedAtMs(), peer.paused());
+
+        switch (currentMode) {
+            case JELLYFIN -> followJellyfin(peer, what);
+            case LOCAL    -> followLocal(peer, what);
+            case SEANIME  -> followSeanime(peer, what);
+        }
+    }
+
+    /** Gives up on a follow: says why, and drops the pending position. */
+    private void followFailed(PeerMedia peer, String reason) {
+        Platform.runLater(() -> {
+            if (!peer.key().equals(playingKey)) return;   // superseded by a newer one
+            if (syncEngine != null) syncEngine.cancelJoin();
+            playingKey = "";
+            lastAnnouncedKey = "";
+            owner.systemMessage(reason);
+        });
+    }
+
+    private void followJellyfin(PeerMedia peer, String what) {
+        final JellyfinClient jf = jellyfinClient;
+        if (jf == null) {
+            followFailed(peer, "Couldn't open " + what + ": connect to Jellyfin first.");
+            return;
+        }
+        Async.run("follow-jellyfin", () -> {
+            JSONObject show = aniZip.fetchShow(peer.anilistId());
+            int tvdbId = 0, season = -1, number = -1;
+            List<String> titles = new ArrayList<>();
+            titles.add(peer.title());
+            if (show != null) {
+                JSONObject mappings = show.optJSONObject("mappings");
+                if (mappings != null) tvdbId = mappings.optInt("thetvdb_id", 0);
+                JSONObject eps = show.optJSONObject("episodes");
+                JSONObject ep  = eps == null ? null : eps.optJSONObject(String.valueOf(peer.episode()));
+                if (ep != null) {
+                    season = ep.optInt("seasonNumber", -1);
+                    number = ep.optInt("episodeNumber", -1);
+                }
+                JSONObject t = show.optJSONObject("titles");
+                if (t != null) for (String lang : t.keySet()) titles.add(t.optString(lang, ""));
+            }
+
+            JellyfinItem series = jf.findSeries(peer.anilistId(), tvdbId, titles);
+            if (series == null) {
+                followFailed(peer, "Couldn't find " + what + " in your Jellyfin library.");
+                return;
+            }
+            List<JellyfinItem> all = jf.getSeriesEpisodes(series.id());
+            JellyfinItem target = pickJellyfinEpisode(all, season, number, peer.episode());
+            if (target == null) {
+                followFailed(peer, "Found " + series.name() + " in Jellyfin, but not episode "
+                        + peer.episode() + ".");
+                return;
+            }
+            List<JellyfinItem> seasonEps = all.stream()
+                    .filter(e -> e.seasonNumber() == target.seasonNumber())
+                    .sorted(Comparator.comparingInt(JellyfinItem::episodeNumber))
+                    .collect(Collectors.toList());
+
+            Platform.runLater(() -> {
+                if (!peer.key().equals(playingKey) || jellyfinClient != jf) return;
+                followLaunch = true;
+                startJellyfin(seasonEps, target);
+            });
+        });
+    }
+
+    /**
+     * The library episode matching an AniList episode.
+     *
+     * <p>TVDB season and episode first, since that is how Jellyfin numbers by
+     * default. Failing that, a series with a single regular season - which is
+     * how the AniList plugin lays shows out - is matched on the AniList
+     * episode number itself.
+     */
+    static JellyfinItem pickJellyfinEpisode(List<JellyfinItem> all, int tvdbSeason,
+                                            int tvdbEpisode, int anilistEpisode) {
+        if (tvdbSeason >= 0 && tvdbEpisode > 0) {
+            for (JellyfinItem e : all) {
+                if (e.seasonNumber() == tvdbSeason && e.episodeNumber() == tvdbEpisode) return e;
+            }
+        }
+        Set<Integer> seasons = all.stream().map(JellyfinItem::seasonNumber)
+                .filter(s -> s > 0).collect(Collectors.toSet());
+        if (seasons.size() == 1) {
+            for (JellyfinItem e : all) {
+                if (e.seasonNumber() > 0 && e.episodeNumber() == anilistEpisode) return e;
+            }
+        }
+        return null;
+    }
+
+    private void followLocal(PeerMedia peer, String what) {
+        String anchor = !currentLocalFile.isBlank() ? currentLocalFile : savedLocalFilePath;
+        File anchorDir = anchor.isBlank() ? null : new File(anchor).getParentFile();
+        if (anchorDir == null || !anchorDir.isDirectory()) {
+            followFailed(peer, "Couldn't open " + what + ": pick a file in Local mode once, "
+                    + "so cowatch knows which folder your shows are in.");
+            return;
+        }
+        Async.run("follow-local", () -> {
+            JSONObject show = aniZip.fetchShow(peer.anilistId());
+            Set<String> titles = new HashSet<>();
+            titles.add(JellyfinClient.titleKey(peer.title()));
+            int absolute = -1;
+            if (show != null) {
+                JSONObject t = show.optJSONObject("titles");
+                if (t != null) for (String lang : t.keySet()) titles.add(JellyfinClient.titleKey(t.optString(lang, "")));
+                JSONObject eps = show.optJSONObject("episodes");
+                JSONObject ep  = eps == null ? null : eps.optJSONObject(String.valueOf(peer.episode()));
+                if (ep != null) absolute = ep.optInt("absoluteEpisodeNumber", -1);
+            }
+            titles.remove("");
+
+            File match = findLocalEpisode(localSearchDirs(anchorDir), titles, peer.episode(), absolute);
+            if (match == null) {
+                followFailed(peer, "Couldn't find " + what + " in " + anchorDir.getParent()
+                        + " or the folders in it.");
+                return;
+            }
+            Platform.runLater(() -> {
+                if (!peer.key().equals(playingKey)) return;
+                savedLocalFilePath = match.getAbsolutePath();
+                localFileField.setText(savedLocalFilePath);
+                currentLocalFile = savedLocalFilePath;
+                List<String> playlist = buildLocalPlaylist(match);
+                followLaunch = true;
+                launchPlaylist(playlist, findIndex(playlist, savedLocalFilePath), false);
+            });
+        });
+    }
+
+    /** The last file's folder first, then the other folders beside it. */
+    private static List<File> localSearchDirs(File anchorDir) {
+        List<File> dirs = new ArrayList<>();
+        dirs.add(anchorDir);
+        File parent = anchorDir.getParentFile();
+        File[] siblings = parent == null ? null : parent.listFiles(File::isDirectory);
+        if (siblings != null) {
+            Arrays.sort(siblings, Comparator.comparing(f -> f.getName().toLowerCase(Locale.ROOT)));
+            for (File d : siblings) {
+                if (dirs.size() >= MAX_LOCAL_DIRS) break;
+                if (!d.equals(anchorDir)) dirs.add(d);
+            }
+        }
+        return dirs;
+    }
+
+    /**
+     * A video file whose name parses to one of {@code titleKeys} and to the
+     * wanted episode, either as numbered within the season or as an absolute
+     * number (long shows and many fansub releases number that way).
+     */
+    private File findLocalEpisode(List<File> dirs, Set<String> titleKeys, int episode, int absolute) {
+        for (File dir : dirs) {
+            File[] files = dir.listFiles(f -> f.isFile() && isVideoFile(f.getName()));
+            if (files == null) continue;
+            Arrays.sort(files, Comparator.comparing(f -> f.getName().toLowerCase(Locale.ROOT)));
+            for (File f : files) {
+                List<Element> elements = AnitomyJ.parse(f.getName());
+                String title = elements.stream()
+                        .filter(e -> e.getCategory() == ElementCategory.kElementAnimeTitle)
+                        .map(Element::getValue).findFirst().orElse("");
+                int ep = elements.stream()
+                        .filter(e -> e.getCategory() == ElementCategory.kElementEpisodeNumber)
+                        .map(Element::getValue).findFirst()
+                        .map(v -> { try { return Integer.parseInt(v); } catch (NumberFormatException x) { return -1; } })
+                        .orElse(-1);
+                if (ep != episode && (absolute <= 0 || ep != absolute)) continue;
+                if (titleMatches(JellyfinClient.titleKey(title), titleKeys)) return f;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Release names shorten and decorate titles ("Frieren" for "Sousou no
+     * Frieren"), so containment either way counts, past a minimum length that
+     * keeps two-letter titles from matching everything.
+     */
+    static boolean titleMatches(String parsedKey, Set<String> titleKeys) {
+        if (parsedKey.isEmpty()) return false;
+        for (String t : titleKeys) {
+            if (t.equals(parsedKey)) return true;
+            if (Math.min(t.length(), parsedKey.length()) >= 4
+                    && (t.contains(parsedKey) || parsedKey.contains(t))) return true;
+        }
+        return false;
+    }
+
+    private void followSeanime(PeerMedia peer, String what) {
+        final SeanimeClient client = seanimeClient;
+        if (client == null) {
+            followFailed(peer, "Couldn't open " + what + ": connect to Seanime first.");
+            return;
+        }
+        final Map<String, SeanimeClient.LocalFile> library = seanimeLibrary;
+        Async.run("follow-seanime", () -> {
+            SeanimeClient.LocalFile file = findSeanimeFile(library, peer);
+            if (file == null) {
+                // The library may have grown since connect.
+                Map<String, SeanimeClient.LocalFile> fresh = client.indexLocalFiles();
+                Platform.runLater(() -> { if (seanimeClient == client) seanimeLibrary = fresh; });
+                file = findSeanimeFile(fresh, peer);
+            }
+            if (file == null) {
+                followFailed(peer, "Couldn't find " + what + " in your Seanime library.");
+                return;
+            }
+            String error = client.playFile(file.path());
+            if (error != null) {
+                followFailed(peer, "Seanime couldn't open " + what + ": " + error);
+            }
+            // Otherwise Seanime launches mpv, and the attach watcher joins it.
+        });
+    }
+
+    private static SeanimeClient.LocalFile findSeanimeFile(Map<String, SeanimeClient.LocalFile> library,
+                                                           PeerMedia peer) {
+        for (SeanimeClient.LocalFile f : library.values()) {
+            if (f.anilistId() == peer.anilistId() && f.episode() == peer.episode()) return f;
+        }
+        return null;
+    }
+
     /** Stops background work. Called when the window closes. */
     public void shutdown() {
         stopSeanimeEvents();
+        stopSeanimeWatch();
+        seanimeWatcher.shutdownNow();
         progressScheduler.shutdownNow();
     }
 

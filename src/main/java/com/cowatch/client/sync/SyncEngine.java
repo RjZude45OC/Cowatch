@@ -7,6 +7,7 @@ import org.json.*;
 
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.*;
 
 public class SyncEngine {
@@ -126,6 +127,55 @@ public class SyncEngine {
         paused = startPaused;
     }
 
+    /**
+     * Where to put the next file once it has loaded, so this player lands where
+     * someone else in the room already is.
+     *
+     * @param remotePos    their position, in the room's timeline, as of receivedAtMs
+     * @param receivedAtMs when this client received it, by this client's clock
+     * @param remotePaused whether they were paused; playing peers keep moving
+     */
+    private record PendingJoin(double remotePos, long receivedAtMs, boolean remotePaused) {}
+
+    private final AtomicReference<PendingJoin> pendingJoin = new AtomicReference<>();
+
+    /**
+     * Seeks the next file mpv loads to a peer's position, and matches their
+     * pause state.
+     *
+     * <p>Applied when mpv reports the new file's duration rather than straight
+     * away: a seek sent before the file is open is dropped. Also covers attaching
+     * to a player that is already open, since mpv answers the duration
+     * subscription with the current value. Nothing is relayed to the room - the
+     * room is already there.
+     */
+    public void joinAt(double remotePos, long receivedAtMs, boolean remotePaused) {
+        pendingJoin.set(new PendingJoin(remotePos, receivedAtMs, remotePaused));
+    }
+
+    /** Drops a join that has not been applied, when what it was for is cancelled. */
+    public void cancelJoin() { pendingJoin.set(null); }
+
+    private void applyPendingJoin() {
+        PendingJoin join = pendingJoin.getAndSet(null);
+        if (join == null) return;
+
+        // Opening the episode can take a while (a Jellyfin stream buffering, a
+        // Seanime launch), and a playing peer kept going meanwhile. Measured on
+        // this client's own clock, so clock skew with the server cannot creep in.
+        double elapsed = join.remotePaused() ? 0
+                : Math.max(0, (System.currentTimeMillis() - join.receivedAtMs()) / 1000.0);
+        double target = clampLocal(toLocal(join.remotePos() + elapsed));
+        log.info(String.format("Joining the room at %.2fs (%s)", target,
+                join.remotePaused() ? "paused" : "playing"));
+        applyRemote(() -> {
+            if (target > SEEK_DEAD_ZONE) mpv.seekTo(target);
+            if (join.remotePaused()) mpv.pause(); else mpv.play();
+        });
+        lastPos = target;
+        paused  = join.remotePaused();
+    }
+
     private final ScheduledExecutorService suppressScheduler =
             Executors.newSingleThreadScheduledExecutor(
                     Async.namedDaemonFactory("sync-suppress-timer"));
@@ -188,6 +238,7 @@ public class SyncEngine {
                         if (!msg.isNull("data")) {
                             mediaDuration = msg.getDouble("data");
                             log.info(String.format("Media duration: %.2fs", mediaDuration));
+                            applyPendingJoin();
                         }
                     }
                     case "path" -> {
@@ -417,6 +468,12 @@ public class SyncEngine {
      * position readout; updated on the mpv event-reader thread.
      */
     public double getPosition() { return lastPos; }
+
+    /** Whether mpv last reported itself paused. */
+    public boolean isPaused() { return paused; }
+
+    /** Position in the room's timeline (offset removed), for announcing it. */
+    public double getRemotePosition() { return clampRemote(toRemote(lastPos)); }
 
     /** Media length in seconds, or -1 until mpv reports one. */
     public double getDuration() { return mediaDuration; }

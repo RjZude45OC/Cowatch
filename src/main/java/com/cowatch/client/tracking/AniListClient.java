@@ -125,7 +125,8 @@ public class AniListClient {
      * Falls back to no-year search if year-filtered search returns nothing.
      */
     public int searchMediaId(String title, int year) {
-        if (token == null || token.isBlank()) return -1;
+        // No token needed: media search is public, and announcing what is
+        // playing should not depend on having set up AniList tracking.
         if (title == null || title.isBlank()) return -1;
 
         JSONObject variables = new JSONObject();
@@ -196,14 +197,17 @@ public class AniListClient {
         body.put("query",     query);
         body.put("variables", variables);
 
-        HttpRequest req = HttpRequest.newBuilder()
+        HttpRequest.Builder b = HttpRequest.newBuilder()
                 .uri(URI.create(ENDPOINT))
                 .header("Content-Type",  "application/json")
                 .header("Accept",        "application/json")
-                .header("Authorization", "Bearer " + token)
                 .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
-                .timeout(Duration.ofSeconds(15))
-                .build();
+                .timeout(Duration.ofSeconds(15));
+        // Media search is public. A "Bearer " with no token behind it is
+        // rejected, so only send one when there is one; that way a viewer
+        // without a token can still look up the AniList id to announce.
+        if (hasToken()) b.header("Authorization", "Bearer " + token);
+        HttpRequest req = b.build();
 
         HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
 
