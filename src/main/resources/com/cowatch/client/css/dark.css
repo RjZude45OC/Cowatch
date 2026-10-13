@@ -137,6 +137,8 @@
 
 .titled-pane {
     -fx-text-fill: -sp-text;
+    /* Breathing room below a pane stacked with other controls. */
+    -fx-padding:   0 0 2px 0;
 }
 
 .titled-pane > .title {
@@ -185,12 +187,6 @@
     -fx-border-radius:     0 0 8px 8px;
     -fx-background-radius: 0 0 8px 8px;
     -fx-padding:           8px 0 0 0;
-}
-
-/* Small breathing room below a collapsed/expanded pane when stacked with
-   other controls (search field, browser lists, Save button, etc). */
-.titled-pane {
-    -fx-padding: 0 0 2px 0;
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -382,7 +378,22 @@
     -fx-alignment:         center;
     -fx-background-color:  -sp-surface2;
     -fx-background-radius: 6px;
-    -fx-padding:           5px 0;
+    -fx-padding:           5px 10px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   NOW PLAYING  — what the attached Seanime player has open
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.now-playing {
+    -fx-text-fill:         -sp-text;
+    -fx-font-weight:       bold;
+    -fx-background-color:  -sp-accent-dim;
+    -fx-border-color:      -sp-accent;
+    -fx-border-width:      0 0 0 3px;
+    -fx-background-radius: 6px;
+    -fx-border-radius:     6px;
+    -fx-padding:           8px 12px;
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -522,6 +533,12 @@
     -fx-background-radius: 12px 12px 0 0;
 }
 .dialog-pane .content.label { -fx-text-fill: -sp-text; -fx-font-size: 13px; }
+.dialog-pane .header-panel .label {
+    -fx-text-fill:   -sp-text;
+    -fx-font-size:   14px;
+    -fx-font-weight: bold;
+}
+.dialog-pane > .button-bar > .container { -fx-background-color: -sp-surface; }
 .dialog-pane .button-bar .button { -fx-min-width: 80px; }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -537,11 +554,6 @@
 .tab .tab-label              { -fx-text-fill: -sp-text-dim; }
 .tab:selected .tab-label     { -fx-text-fill: -sp-text; -fx-font-weight: bold; }
 
-/* Phone layout puts the tab strip along the bottom, so the separator and the
-   selected-tab indicator both have to move to the top edge — otherwise the
-   rule lands between the tabs and the screen bezel, where it reads as a gap. */
-.tab-pane:bottom .tab-header-area { -fx-border-width: 1 0 0 0; }
-.tab-pane:bottom .tab:selected    { -fx-border-width: 2 0 0 0; }
 
 /* ════════════════════════════════════════════════════════════════════════════
    CONTEXT MENU
@@ -577,7 +589,7 @@
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
-   COMPACT MODE — MainWindow adds .compact alongside .layout-phone
+   COMPACT MODE — MainWindow adds .compact below 720px wide
    ════════════════════════════════════════════════════════════════════════════ */
 
 .compact .card          { -fx-padding: 10px; }
@@ -585,25 +597,6 @@
 .compact .label.heading { -fx-font-size: 12px; }
 .compact .button        { -fx-padding: 6px 12px; }
 .compact .titled-pane > .title { -fx-padding: 6px 8px; }
-
-/* ════════════════════════════════════════════════════════════════════════════
-   RESPONSIVE LAYOUT MODES
-   MainWindow stamps exactly one of these on the scene root as the window
-   crosses its breakpoints (phone < 760px < tablet < 1180px < desktop).
-   ════════════════════════════════════════════════════════════════════════════ */
-
-/* Phone: one column behind a bottom tab bar. Touch targets get more room and
-   the card shadows come off — stacked shadows muddy a single narrow column. */
-.layout-phone .card       { -fx-effect: none; }
-.layout-phone .button     { -fx-padding: 9px 14px; }
-.layout-phone .text-field,
-.layout-phone .password-field { -fx-padding: 9px 12px; }
-
-/* Tablet: controls beside a media/chat stack. Slightly tighter than desktop
-   so three panes still breathe at ~1000px. */
-.layout-tablet .card { -fx-padding: 12px; }
-
-/* Desktop: the full three-column theatre, at the default metrics. */
 
 /* ════════════════════════════════════════════════════════════════════════════
    COLLAPSIBLE SECTION SPACING
@@ -752,8 +745,8 @@
 .settings-root { -fx-background-color: -sp-bg; }
 .settings-root .tab-pane .tab-header-area { -fx-padding: 4px 4px 0 4px; }
 
-/* Hyperlinks are used only as disclosure toggles, so they should read as quiet
-   text rather than as web links. */
+/* Hyperlinks are used only as disclosure toggles ("Server has a password"),
+   so they read as small accent text rather than as underlined web links. */
 .hyperlink {
     -fx-text-fill:   -sp-accent;
     -fx-border-color: transparent;

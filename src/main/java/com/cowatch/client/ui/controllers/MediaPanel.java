@@ -2,6 +2,7 @@ package com.cowatch.client.ui.controllers;
 
 import com.cowatch.client.jellyfin.*;
 import com.cowatch.client.seanime.SeanimeClient;
+import com.cowatch.client.seanime.SeanimeEvents;
 import com.cowatch.client.model.SyncMode;
 import com.cowatch.client.sync.SyncEngine;
 import com.cowatch.client.tracking.AniListClient;
@@ -95,6 +96,13 @@ public class MediaPanel {
     private TitledPane          seanimeConnPane;
 
     private SeanimeClient seanimeClient;
+    private SeanimeEvents seanimeEvents;
+
+    /**
+     * SHA-256 of the Seanime server password, which is what Seanime checks.
+     * Kept instead of the password so the settings file never holds it.
+     */
+    private String seanimeTokenHash = "";
 
     /** Normalised file path to library entry, for resolving what mpv reports. */
     private Map<String, SeanimeClient.LocalFile> seanimeLibrary = Map.of();
@@ -102,8 +110,10 @@ public class MediaPanel {
     /** Stops a run of library misses queuing one full re-index each. */
     private final AtomicBoolean seanimeReindexing = new AtomicBoolean(false);
 
-    private int seanimeAnilistId = 0;
-    private int seanimeEpisode   = 0;
+    private boolean seanimeAttached = false;
+
+    /** "anilistId:episode" last sent to the room, so each episode is announced once. */
+    private String lastAnnouncedKey = "";
 
     // ── Local file widgets ────────────────────────────────────────────────
     private final TextField localFileField    = field("No file selected");
@@ -151,6 +161,10 @@ public class MediaPanel {
         // one copy per rebuild.
         episodesList.getSelectionModel().selectedItemProperty()
                 .addListener((obs, old, now) -> launchJfBtn.setDisable(now == null));
+
+        // The now-playing strip takes no space until there is something in it.
+        nowPlayingLabel.visibleProperty().bind(nowPlayingLabel.textProperty().isNotEmpty());
+        nowPlayingLabel.managedProperty().bind(nowPlayingLabel.visibleProperty());
 
         nextJfBtn.setDisable(true);
         nextLocalBtn.setDisable(true);
@@ -431,7 +445,7 @@ public class MediaPanel {
         HBox.setHgrow(jellyfinConnBtn, Priority.ALWAYS);
 
         addOnce(jellyfinSaveBtn, "secondary");
-        jellyfinSaveBtn.setOnAction(e -> savePrefs());
+        jellyfinSaveBtn.setOnAction(e -> savePrefs(jellyfinSaveBtn));
 
         VBox apiKeyRow = rowLabel("API key", jellyfinApiField);
         boolean hasKey = !jellyfinApiField.getText().trim().isEmpty();
@@ -867,6 +881,9 @@ public class MediaPanel {
             jellyfinClient.reportPlaybackStart(startItem.id(), 0, true);
             jellyfinClient.registerCapabilities();
 
+            // A relaunch while the last session's ticker still runs would
+            // otherwise leave two of them reporting.
+            if (progressTask != null) progressTask.cancel(false);
             progressTask = progressScheduler.scheduleAtFixedRate(() -> {
                 if (jellyfinClient != null
                         && !jfEpisodeList.isEmpty()
@@ -908,21 +925,26 @@ public class MediaPanel {
 
     // ── Preferences ───────────────────────────────────────────────────────
 
-    private void savePrefs() {
+    /**
+     * Writes the media settings.
+     *
+     * @param feedback the Save button that was pressed, to flash a confirmation
+     *                 on; null for a save the user did not ask for
+     */
+    private void savePrefs(Button feedback) {
         Properties p = new Properties();
         p.setProperty("jellyfin.url",      jellyfinUrlField.getText().trim());
         p.setProperty("jellyfin.username", jellyfinUserField.getText().trim());
         p.setProperty("jellyfin.apikey",   jellyfinApiField.getText().trim());
-        p.setProperty("seanime.url",        seanimeUrlField.getText().trim());
-        p.setProperty("seanime.token",      seanimeTokenField.getText().trim());
-        // The password is deliberately absent: this file is plain text. A
-        // successful login stores the access token Jellyfin hands back
-        // instead, which reconnects just as well and can be revoked server
-        // side. See AppPrefs.isSecret().
+        p.setProperty("seanime.url",       seanimeUrlField.getText().trim());
+        p.setProperty("seanime.tokenhash", effectiveSeanimeTokenHash());
+        // Passwords are deliberately absent: this file is plain text. Jellyfin
+        // gets the access token it hands back after a login instead, and
+        // Seanime the hash it compares against. See AppPrefs.isSecret().
 
         try {
             AppPrefs.save(PREFS_FILE, p, "cowatch media settings");
-            Motion.confirm(jellyfinSaveBtn, "Saved ✓");
+            if (feedback != null) Motion.confirm(feedback, "Saved ✓");
         } catch (IOException ex) {
             owner.showError("Save Failed", "Could not save settings:\n" + ex.getMessage());
         }
@@ -934,7 +956,21 @@ public class MediaPanel {
         jellyfinUserField.setText(p.getProperty("jellyfin.username", ""));
         jellyfinApiField.setText( p.getProperty("jellyfin.apikey",   ""));
         seanimeUrlField.setText(  p.getProperty("seanime.url",       seanimeUrlField.getText()));
-        seanimeTokenField.setText(p.getProperty("seanime.token",     ""));
+        seanimeTokenHash = p.getProperty("seanime.tokenhash", "");
+
+        // Older builds stored the Seanime password itself. Swap it for its hash
+        // and drop it from disk.
+        if (p.containsKey("seanime.token")) {
+            String legacyPassword = p.getProperty("seanime.token", "");
+            if (!legacyPassword.isEmpty()) seanimeTokenHash = SeanimeClient.hashPassword(legacyPassword);
+            p.remove("seanime.token");
+            p.setProperty("seanime.tokenhash", seanimeTokenHash);
+            try {
+                AppPrefs.save(PREFS_FILE, p, "cowatch media settings");
+            } catch (IOException ex) {
+                log.warning("Could not migrate the stored Seanime password: " + ex.getMessage());
+            }
+        }
 
         // Reconnect unattended only when a stored token can do it without a
         // password prompt. Anything else waits for the user to press Connect.
@@ -989,10 +1025,16 @@ public class MediaPanel {
         HBox.setHgrow(seanimeConnBtn, Priority.ALWAYS);
 
         addOnce(seanimeSaveBtn, "secondary");
-        seanimeSaveBtn.setOnAction(e -> savePrefs());
+        seanimeSaveBtn.setOnAction(e -> savePrefs(seanimeSaveBtn));
+
+        seanimeTokenField.setPromptText(seanimeTokenHash.isEmpty()
+                ? "Password"
+                : "Saved - leave blank to keep it");
+        seanimeUrlField.setOnAction(e -> handleSeanimeConnect());
+        seanimeTokenField.setOnAction(e -> handleSeanimeConnect());
 
         VBox tokenRow = rowLabel("Server password", seanimeTokenField);
-        boolean hasToken = !seanimeTokenField.getText().trim().isEmpty();
+        boolean hasToken = !seanimeTokenHash.isEmpty() || !seanimeTokenField.getText().isEmpty();
         setShown(tokenRow, hasToken);
 
         Hyperlink tokenToggle = new Hyperlink(hasToken ? "Hide password" : "Server has a password");
@@ -1018,17 +1060,18 @@ public class MediaPanel {
 
         addOnce(attachBtn, "green");
         attachBtn.setMaxWidth(Double.MAX_VALUE);
-        attachBtn.setDisable(seanimeClient == null);
+        attachBtn.setDisable(seanimeClient == null || seanimeAttached);
         attachBtn.setOnAction(e -> handleSeanimeAttach());
         HBox.setHgrow(attachBtn, Priority.ALWAYS);
 
         nowPlayingLabel.setWrapText(true);
-        addOnce(nowPlayingLabel, "subhead");
+        addOnce(nowPlayingLabel, "now-playing");
 
         Label hint = new Label(
-                "Start the episode in Seanime, then press Attach. cowatch joins the mpv "
-              + "window Seanime opened, so play, pause and seek stay in sync whichever "
-              + "side presses them. Seanime keeps updating AniList itself.");
+                "Play the episode in Seanime with mpv as its media player, then press "
+              + "Attach. cowatch joins that mpv window, so play, pause and seek stay in "
+              + "sync whichever side presses them, and tells the room which episode it "
+              + "is. Seanime keeps updating AniList itself.");
         hint.setWrapText(true);
         hint.getStyleClass().add("subhead");
 
@@ -1044,15 +1087,23 @@ public class MediaPanel {
 
     // --- Seanime handlers -------------------------------------------------
 
+    /** The token to connect with: a freshly typed password wins over the saved one. */
+    private String effectiveSeanimeTokenHash() {
+        String typed = seanimeTokenField.getText();
+        return typed.isEmpty() ? seanimeTokenHash : SeanimeClient.hashPassword(typed);
+    }
+
     private void handleSeanimeConnect() {
-        final String url   = seanimeUrlField.getText().trim();
-        final String token = seanimeTokenField.getText().trim();
+        if (seanimeConnBtn.isDisabled()) return;
+        final String url  = seanimeUrlField.getText().trim();
+        final String hash = effectiveSeanimeTokenHash();
 
         seanimeConnBtn.setDisable(true);
+        seanimeConnBtn.setText("Connecting...");
         setSeanimeStatus("Connecting...", "pending");
 
         Async.run("seanime-connect", () -> {
-            SeanimeClient client = new SeanimeClient(url, token);
+            SeanimeClient client = new SeanimeClient(url, hash);
             String error = client.connect();
             Map<String, SeanimeClient.LocalFile> index =
                     (error == null) ? client.indexLocalFiles() : Map.of();
@@ -1060,35 +1111,69 @@ public class MediaPanel {
             Platform.runLater(() -> {
                 seanimeConnBtn.setDisable(false);
                 if (error != null) {
+                    stopSeanimeEvents();
                     seanimeClient = null;
                     seanimeLibrary = Map.of();
                     attachBtn.setDisable(true);
+                    seanimeConnBtn.setText("Connect to Seanime");
                     setSeanimeStatus(error, "error");
                     if (seanimeConnPane != null) seanimeConnPane.setExpanded(true);
                     return;
                 }
 
-                seanimeClient  = client;
-                seanimeLibrary = index;
-                attachBtn.setDisable(false);
-                seanimeConnBtn.setText("Connected");
-                savePrefs();
+                seanimeClient    = client;
+                seanimeLibrary   = index;
+                seanimeTokenHash = hash;
+                seanimeTokenField.clear();
+                seanimeTokenField.setPromptText(hash.isEmpty() ? "Password" : "Saved - leave blank to keep it");
+                attachBtn.setDisable(seanimeAttached);
+                seanimeConnBtn.setText("Reconnect");
+                savePrefs(null);
+                startSeanimeEvents(client);
 
                 String who = client.getUserName().isEmpty() ? "" : " as " + client.getUserName();
-                String socket = client.getMpvSocket();
-                if (socket.isBlank()) {
+                String ver = client.getVersion().isEmpty() ? "" : " (Seanime " + client.getVersion() + ")";
+                String files = index.size() == 1 ? "1 file" : index.size() + " files";
+                if (!client.usesExternalMpv()) {
                     // Worth saying up front rather than at Attach time: the fix is
                     // in Seanime's settings, not here.
-                    setSeanimeStatus("Connected" + who + " - " + index.size() + " files indexed. "
-                            + "No fixed mpv socket set in Seanime, so attaching will not work yet: "
-                            + "set one under Settings, Media Player, mpv socket.", "error");
+                    setSeanimeStatus("Connected" + who + ver + ", but Seanime plays with "
+                            + client.getDefaultPlayer() + ". cowatch can only join mpv: in "
+                            + "Seanime, set Settings, Media player, Default player to mpv.", "error");
+                    if (seanimeConnPane != null) seanimeConnPane.setExpanded(true);
                 } else {
-                    setSeanimeStatus("Connected" + who + " - " + index.size()
-                            + " files indexed, mpv socket " + socket, "ok");
+                    String socket = client.usesAutoSocket()
+                            ? "finds Seanime's mpv automatically"
+                            : "uses mpv socket " + client.getMpvSocket();
+                    setSeanimeStatus("Connected" + who + ver + ". " + files
+                            + " in the library; attaching " + socket + ".", "ok");
                     if (seanimeConnPane != null) seanimeConnPane.setExpanded(false);
                 }
             });
         });
+    }
+
+    /**
+     * Follows Seanime's live playback events, which name the AniList entry and
+     * episode directly. Works for streams as well as library files.
+     */
+    private void startSeanimeEvents(SeanimeClient client) {
+        stopSeanimeEvents();
+        seanimeEvents = new SeanimeEvents(client,
+                playback -> Platform.runLater(() -> {
+                    if (seanimeClient == client) onSeanimePlayback(playback);
+                }),
+                () -> Platform.runLater(() -> {
+                    if (seanimeClient == client && !seanimeAttached) nowPlayingLabel.setText("");
+                }));
+        seanimeEvents.start();
+    }
+
+    private void stopSeanimeEvents() {
+        if (seanimeEvents != null) {
+            seanimeEvents.close();
+            seanimeEvents = null;
+        }
     }
 
     /**
@@ -1100,49 +1185,69 @@ public class MediaPanel {
      */
     private void handleSeanimeAttach() {
         if (seanimeClient == null) return;
-        final String socket = seanimeClient.getMpvSocket();
+        final SeanimeClient client = seanimeClient;
 
         attachBtn.setDisable(true);
         attachBtn.setText("Attaching...");
-        owner.onAttachToSeanime(socket);
+        owner.onAttachToSeanime(client::mpvSocketCandidates);
     }
 
-    /** Called by MainWindow once an attach attempt has finished. */
+    /** Called by MainWindow once an attach attempt has finished, or the player closed. */
     public void onSeanimeAttached(boolean success) {
-        attachBtn.setText(success ? "Attached" : "Attach to Seanime playback");
-        attachBtn.setDisable(success);
-        if (!success) nowPlayingLabel.setText("");
+        seanimeAttached = success;
+        attachBtn.setText(success ? "Attached to Seanime's mpv" : "Attach to Seanime playback");
+        attachBtn.setDisable(success || seanimeClient == null);
+        if (!success) {
+            nowPlayingLabel.setText("");
+            lastAnnouncedKey = "";
+        }
     }
 
     /**
      * Resolves the file mpv reports against Seanime's library and tells the room.
      *
-     * <p>This is the hop that makes a mixed room work: the path is meaningless to
-     * a viewer streaming from Jellyfin, but the AniList id it maps to is not.
+     * <p>The fallback for when Seanime's live events are not available. Streams
+     * report a URL here that no library lookup can resolve; those are left to
+     * {@link #onSeanimePlayback}.
      *
      * <p>Called on the FX thread from MainWindow's SyncEngine listener.
      */
     public void onSeanimeMediaPath(String path) {
-        if (seanimeClient == null) return;
+        if (seanimeClient == null || currentMode != SyncMode.SEANIME) return;
 
         SeanimeClient.LocalFile file = seanimeLibrary.get(SeanimeClient.normalizePath(path));
         if (file == null) {
-            // Playing something outside the scanned library, or the library changed
-            // since connect. Re-index once in the background rather than giving up.
-            nowPlayingLabel.setText("Playing a file Seanime has not scanned: "
-                    + new File(path).getName());
-            reindexSeanimeLibrary();
+            // A stream, a file outside the scanned library, or a library that
+            // changed since connect. Re-index once in the background; Seanime's
+            // own playback event will name the episode either way.
+            if (!path.contains("://")) reindexSeanimeLibrary();
             return;
         }
+        announceSeanime(file.anilistId(), file.episode(), "", new File(file.path()).getName());
+    }
 
-        seanimeAnilistId = file.anilistId();
-        seanimeEpisode   = file.episode();
-        nowPlayingLabel.setText("Episode " + file.episode()
-                + "  (AniList id " + file.anilistId() + ")");
+    /** Seanime said what it is playing. */
+    private void onSeanimePlayback(SeanimeEvents.Playback playback) {
+        if (currentMode != SyncMode.SEANIME) return;
+        announceSeanime(playback.anilistId(), playback.episode(), playback.title(), playback.filename());
+    }
 
-        // Announce to the room so the other side can open its own copy.
-        owner.announceMedia(file.anilistId(), file.episode(),
-                new File(file.path()).getName(), "seanime");
+    /**
+     * Shows the episode and tells the room, once per episode.
+     *
+     * <p>The library lookup and the live event usually both fire for the same
+     * file; the room only needs to hear about it once.
+     */
+    private void announceSeanime(int anilistId, int episode, String title, String filename) {
+        if (anilistId <= 0 || episode <= 0) return;
+        String name = title.isBlank() ? filename : title;
+        nowPlayingLabel.setText((name.isBlank() ? "AniList " + anilistId : name)
+                + "  ·  Episode " + episode);
+
+        String key = anilistId + ":" + episode;
+        if (key.equals(lastAnnouncedKey)) return;
+        lastAnnouncedKey = key;
+        owner.announceMedia(anilistId, episode, name, "seanime");
     }
 
     /**
@@ -1170,6 +1275,12 @@ public class MediaPanel {
         seanimeStatus.getStyleClass()
                 .removeAll("jellyfin-status-pending", "jellyfin-status-ok", "jellyfin-status-error");
         seanimeStatus.getStyleClass().add("jellyfin-status-" + state);
+    }
+
+    /** Stops background work. Called when the window closes. */
+    public void shutdown() {
+        stopSeanimeEvents();
+        progressScheduler.shutdownNow();
     }
 
     // ── UI helpers ────────────────────────────────────────────────────────
