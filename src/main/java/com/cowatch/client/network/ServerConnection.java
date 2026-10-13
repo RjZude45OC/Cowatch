@@ -14,10 +14,16 @@ public class ServerConnection {
 
     private static final Logger log = Logger.getLogger(ServerConnection.class.getName());
 
+    /** How long to wait for the server before giving up, instead of the OS default of ~20s. */
+    private static final int CONNECT_TIMEOUT_MS = 5_000;
+
     private Socket socket;
     private PrintWriter out;
     private Thread readerThread;
-    private boolean connected = false;
+    private volatile boolean connected = false;
+
+    /** Told when the server drops the connection without being asked to. */
+    private volatile Runnable onConnectionLost;
 
     // Multiple handlers instead of one
     private final List<Consumer<String>> messageHandlers = new CopyOnWriteArrayList<>();
@@ -26,7 +32,8 @@ public class ServerConnection {
 
     public boolean connect(String host, int port) {
         try {
-            socket = new Socket(host, port);
+            socket = new Socket();
+            socket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
             socket.setKeepAlive(true);
             // The wire protocol is UTF-8. Relying on the platform default
             // corrupts non-ASCII chat and usernames on any machine whose
@@ -37,8 +44,9 @@ public class ServerConnection {
             connected = true;
             log.info("Connected to server: " + host + ":" + port);
             return true;
-        } catch (IOException e) {
+        } catch (IOException | IllegalArgumentException e) {
             log.severe("Failed to connect to server: " + e.getMessage());
+            if (socket != null) try { socket.close(); } catch (IOException ignored) {}
             return false;
         }
     }
@@ -57,7 +65,12 @@ public class ServerConnection {
             } catch (IOException e) {
                 if (connected) log.warning("Server connection lost: " + e.getMessage());
             } finally {
+                // Still flagged connected here means nobody called disconnect():
+                // the server went away on its own, and the UI needs to know.
+                boolean unexpected = connected;
                 connected = false;
+                Runnable lost = onConnectionLost;
+                if (unexpected && lost != null) lost.run();
             }
         }, "ServerReader");
         readerThread.setDaemon(true);
@@ -160,4 +173,10 @@ public class ServerConnection {
     }
 
     public boolean isConnected() { return connected; }
+
+    /**
+     * Registers a callback for the server closing the connection on its own.
+     * Runs on the reader thread. Not called for {@link #disconnect()}.
+     */
+    public void setOnConnectionLost(Runnable handler) { this.onConnectionLost = handler; }
 }

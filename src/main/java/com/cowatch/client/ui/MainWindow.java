@@ -14,6 +14,7 @@ import javafx.scene.layout.*;
 import javafx.stage.Stage;
 
 import java.io.IOException;
+import java.net.URL;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -85,6 +86,9 @@ public class MainWindow {
         headerBar.setOnConnect(() -> settings.show(0));
         headerBar.setOnOpenSettings(settings::show);
         headerBar.setOnToggleChat(this::toggleChat);
+
+        // Show the media source the saved settings pick, not always Jellyfin.
+        mediaPanel.setMode(configPanel.getSelectedMode());
 
         buildLayout();
         wireShutdown();
@@ -192,8 +196,10 @@ public class MainWindow {
     public void onConnect(SessionConfig config) throws IOException {
         boolean ok = server.connect(config.serverHost, config.serverPort);
         if (!ok) {
-            throw new IOException("Could not connect to " + config.serverHost + ":" + config.serverPort);
+            throw new IOException("Could not connect to " + config.serverHost + ":" + config.serverPort
+                    + ". Check the server is running and the address and port are right.");
         }
+        server.setOnConnectionLost(() -> Platform.runLater(this::onConnectionLost));
 
         double savedOffset = offsetPanel.getOffset();
 
@@ -228,6 +234,18 @@ public class MainWindow {
         if (!mpv.isRunning()) playbackControls.setEnabled(false);
         systemMessage("Disconnected from server");
         configPanel.onDisconnected();
+    }
+
+    /**
+     * The server went away without being asked to. Without this the header
+     * kept saying "connected" while nothing reached the room any more.
+     */
+    private void onConnectionLost() {
+        server.disconnect();
+        syncEngine.close();
+        headerBar.setDisconnected();
+        configPanel.onDisconnected();
+        systemMessage("Lost the connection to the server. Reconnect from Settings.");
     }
 
     /** Logs an app event to the chat transcript and flags it if chat is hidden. */
@@ -290,10 +308,26 @@ public class MainWindow {
      * connection the same way {@link #launch} waits on a process, so closing that
      * player resets this UI too. Nothing here starts or stops mpv: the viewer owns
      * it through Seanime, and cowatch is a second IPC client on the same socket.
+     *
+     * @param candidates the sockets to try in order, looked up off the FX
+     *                   thread; the first that answers wins
      */
-    public void onAttachToSeanime(String socketPath) {
+    public void onAttachToSeanime(Supplier<List<String>> candidates) {
+        // Attaching mid-episode reports mpv's current state as if it had just
+        // changed. Nobody pressed anything, so the room must not hear about it.
+        syncEngine.beginQuietPeriod();
         Async.run("seanime-attach", () -> {
-            String error = mpv.attach(socketPath);
+            List<String> socketPaths = candidates.get();
+            String found = socketPaths.isEmpty()
+                    ? "No Seanime player is running." + System.lineSeparator() + System.lineSeparator()
+                      + "Start the episode in Seanime first, with mpv as its media player, "
+                      + "then press Attach again."
+                    : null;
+            for (String socket : socketPaths) {
+                found = mpv.attach(socket);
+                if (found == null) break;
+            }
+            final String error = found;
             Platform.runLater(() -> {
                 boolean ok = (error == null);
                 mediaPanel.onSeanimeAttached(ok);
@@ -358,6 +392,9 @@ public class MainWindow {
     /** Last playback position mpv reported, in seconds. */
     public double getPosition() { return syncEngine.getPosition(); }
 
+    /** Length of what mpv is playing, in seconds, or -1 while unknown. */
+    public double getDuration() { return syncEngine.getDuration(); }
+
     // --- Playback actions -------------------------------------------------
 
     public void doPlay()                 { mpvExecutor.submit(() -> syncEngine.localPlay()); }
@@ -379,6 +416,10 @@ public class MainWindow {
             alert.setHeaderText(title);
             alert.setContentText(body);
             alert.initOwner(stage);
+            // Dialogs get a scene of their own, which does not inherit the
+            // window's stylesheet - without this they render in stock light grey.
+            URL css = CoWatchApp.class.getResource(CoWatchApp.CSS_PATH);
+            if (css != null) alert.getDialogPane().getStylesheets().add(css.toExternalForm());
             alert.getDialogPane().setPrefWidth(460);
             alert.getDialogPane().setMinHeight(Region.USE_PREF_SIZE);
             alert.showAndWait();
@@ -391,6 +432,7 @@ public class MainWindow {
     private void wireShutdown() {
         stage.setOnCloseRequest(e -> {
             settings.hide();
+            mediaPanel.shutdown();
             mpvExecutor.shutdownNow();
             syncEngine.close();
             server.disconnect();

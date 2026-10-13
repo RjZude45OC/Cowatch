@@ -91,26 +91,34 @@ instances, and Seanime cannot read a Jellyfin library, so a room where one
 person streams from Jellyfin and the other plays downloads needs cowatch in
 the middle.
 
-On the Seanime side, one setting has to change first:
-
-1. In Seanime, open **Settings → Media Player** and set a fixed **mpv socket**
-   name. Seanime otherwise invents a new socket name for every playback
-   (`pid_timestamp_counter`), which cowatch has no way to guess.
-2. If the Seanime server is on another machine, set `host = 0.0.0.0` in its
-   `config.toml`; it binds to `127.0.0.1` by default.
+On the Seanime side, check one setting: **Settings → Media Player → Default
+player** must be **mpv**. cowatch joins an external mpv window; it cannot join
+VLC, MPC-HC or IINA, or the players built into Seanime itself (the web player
+and Seanime Denshi's embedded player). The **mpv socket** setting can stay as
+it is. When it is blank or the old default `\\.\pipe\mpv_ipc`, Seanime picks
+a new socket name for every playback, and cowatch finds the newest one itself.
 
 Then, in cowatch:
 
 1. Pick the **Seanime** sync mode and enter the server address
-   (default `127.0.0.1:43211`). The password field is only needed if the
-   Seanime server has one set.
-2. Start the episode **in Seanime**, as usual.
+   (default `127.0.0.1:43211`). Only fill in the password if the Seanime
+   server has one set; cowatch stores its SHA-256 hash, which is what Seanime
+   checks, never the password itself.
+2. Start the episode **in Seanime**, as usual. Library files, torrent streams
+   and debrid streams all work.
 3. Press **Attach to Seanime playback**.
 
-cowatch connects as a second client on that mpv socket, reads back which file
-is loaded, resolves it against Seanime's library to an AniList id and episode
-number, and announces that to the room. From then on play, pause and seek
-propagate in both directions.
+cowatch connects as a second client on that mpv socket and listens to
+Seanime's live event stream, which names the AniList id and episode of
+whatever Seanime is playing. It announces that to the room, falling back to a
+lookup in Seanime's scanned library if the event stream is unavailable. From
+then on play, pause and seek propagate in both directions. Attaching midway
+through an episode does not send a play or seek to the room.
+
+Attaching needs cowatch and Seanime on the same machine, since mpv's socket is
+local. Connecting to a Seanime server elsewhere (`host = 0.0.0.0` in its
+`config.toml`) is possible but only useful for status; it also needs a server
+password once the client is outside the local network.
 
 AniList progress stays with Seanime in this mode. It is already tracking the
 episode it started, and two writers on one list entry would race each other.
@@ -131,7 +139,9 @@ Three files live there: `cowatch.properties` for the connection,
 
 These files are **not encrypted**. Your Jellyfin password is never written to
 them — logging in stores the access token Jellyfin returns instead, which
-reconnects the same way and can be revoked from the server. The AniList token
+reconnects the same way and can be revoked from the server. The Seanime
+password is stored as the SHA-256 hash Seanime checks; a password saved by an
+older build is converted on the next start. The AniList token
 is stored as-is, so treat the directory as sensitive and revoke the token from
 `anilist.co/settings/developer` if the machine is shared.
 
@@ -172,7 +182,7 @@ com.cowatch.client
 ├── model               session config and sync mode
 ├── mpv                 mpv process control and JSON IPC (named pipe / unix socket)
 ├── network             server socket and wire protocol
-├── seanime             Seanime REST client, library path index, progress handoff
+├── seanime             Seanime REST client, live playback events, mpv socket discovery
 ├── sync                clock sync, drift correction, watched-threshold detection
 ├── tracking            AniList and AniZip clients
 ├── ui                  window shell, responsive layout, motion, panels
@@ -185,9 +195,9 @@ com.cowatch.client
   offset panel, and it only corrects a constant shift, not a different edit.
 - The Jellyfin source reports progress back to the server every 10 seconds
   while playing, so a hard crash can leave a stale "now playing" entry.
-- Seanime mode needs a fixed **mpv socket** name set in Seanime, because
-  Seanime otherwise picks a new one per playback. It also needs the episode to
-  already be playing there: the socket exists only while its player runs.
+- Seanime mode needs Seanime to play through an external mpv on the same
+  machine, and the episode to already be playing there: the socket exists only
+  while that player runs.
 - A `media` announcement is relayed but not acted on automatically. The other
   side is told which AniList id and episode to open and still picks its own
   copy by hand; resolving an AniList id back to a Jellyfin item is approximate

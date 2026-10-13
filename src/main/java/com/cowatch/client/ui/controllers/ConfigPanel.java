@@ -104,13 +104,26 @@ public class ConfigPanel {
     // ── Handlers ─────────────────────────────────────────────────────────
 
     private void handleConnect() {
+        String host = hostField.getText().trim();
+        String user = userField.getText().trim();
+        if (host.isEmpty()) {
+            Motion.shake(hostField);
+            owner.showError("Invalid Input", "Enter the address of the cowatch server.");
+            return;
+        }
+        if (user.isEmpty()) {
+            Motion.shake(userField);
+            owner.showError("Invalid Input", "Enter a display name so the room knows who you are.");
+            return;
+        }
         try {
             int port = Integer.parseInt(portField.getText().trim());
+            if (port < 1 || port > 65535) throw new NumberFormatException();
             SessionConfig config = SessionConfig.builder()
-                    .serverHost(hostField.getText().trim())
+                    .serverHost(host)
                     .serverPort(port)
                     .roomId("room1")
-                    .username(userField.getText().trim())
+                    .username(user)
                     .mode(selectedMode)
                     .build();
 
@@ -118,7 +131,8 @@ public class ConfigPanel {
             connectBtn.setText("Connecting…");
             owner.onConnect(config);
         } catch (NumberFormatException ex) {
-            owner.showError("Invalid Input", "Port must be a number.");
+            Motion.shake(portField);
+            owner.showError("Invalid Input", "Port must be a number from 1 to 65535.");
         } catch (IOException e) {
             owner.showError("Connection Failed", e.getMessage(), () -> {
                 connectBtn.setDisable(false);
@@ -128,6 +142,9 @@ public class ConfigPanel {
     }
 
     public void onConnected()    { connectBtn.setText("Connected ✓"); }
+
+    /** The sync mode picked here, including one restored from saved settings. */
+    public SyncMode getSelectedMode() { return selectedMode; }
     public void onDisconnected() { connectBtn.setDisable(false); connectBtn.setText("Connect"); }
 
     // ── Preferences persistence ───────────────────────────────────────────

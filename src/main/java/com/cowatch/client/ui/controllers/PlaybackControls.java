@@ -68,7 +68,7 @@ public class PlaybackControls {
         fwd30Btn.setOnAction(e  -> owner.doSkipForward(30));
 
         posLabel.getStyleClass().add("position-value");
-        posLabel.setMinWidth(76);
+        posLabel.setMinWidth(Region.USE_PREF_SIZE);
 
         HBox transport = new HBox(4, back30Btn, back5Btn, playBtn, pauseBtn, fwd5Btn, fwd30Btn);
         transport.setAlignment(Pos.CENTER);
@@ -163,8 +163,11 @@ public class PlaybackControls {
 
     // --- Position readout -------------------------------------------------
 
+    /** Position, plus the length once mpv knows it: "00:14:32 / 00:23:40". */
     private void refreshPosition() {
-        posLabel.setText(formatTime(owner.getPosition()));
+        String pos = formatTime(owner.getPosition());
+        double duration = owner.getDuration();
+        posLabel.setText(duration > 0 ? pos + " / " + formatTime(duration) : pos);
     }
 
     private static String formatTime(double seconds) {

@@ -3,6 +3,7 @@ package com.cowatch.client.mpv;
 import com.cowatch.client.util.Async;
 
 import com.sun.jna.*;
+import com.sun.jna.platform.win32.WinBase;
 import com.sun.jna.platform.win32.WinNT;
 import com.sun.jna.win32.StdCallLibrary;
 
@@ -238,20 +239,18 @@ public class MPVController {
      * it. Sync therefore works in both directions - the room sees his pause, and
      * a pause from the room reaches his player.
      *
-     * <p>The socket name has to be known in advance. Seanime generates a fresh
-     * one per launch (pid_timestamp_counter) unless a fixed name is set under its
-     * Settings, Media Player, mpv socket - which is the value
-     * {@link com.cowatch.client.seanime.SeanimeClient#getMpvSocket()} reads back.
+     * <p>Which socket to use is the caller's problem: Seanime either uses a fixed
+     * name from its settings or generates a fresh one per launch, and
+     * {@link com.cowatch.client.seanime.SeanimeClient#mpvSocketCandidates()}
+     * works out which.
      *
      * @param socketPath the IPC socket or Windows named pipe mpv is listening on
      * @return null on success, or a human-readable reason it failed
      */
     public String attach(String socketPath) {
         if (socketPath == null || socketPath.isBlank()) {
-            return "No mpv socket configured." + NL + NL
-                 + "In Seanime, open Settings then Media Player and set a fixed "
-                 + "mpv socket name, then reconnect. Without one, Seanime picks a new "
-                 + "socket name for every playback and cowatch cannot find it.";
+            return "No mpv socket to attach to." + NL + NL
+                 + "Start the episode in Seanime first, with mpv as its media player.";
         }
         reset();
 
@@ -272,7 +271,17 @@ public class MPVController {
                  + "its player is running.";
         }
 
-        if (!connectIPC()) {
+        // A second client can briefly find every pipe instance busy while mpv
+        // spins up the next one, so give it a few tries before giving up.
+        boolean connected = false;
+        for (int attempt = 0; attempt < 3 && !connected; attempt++) {
+            if (attempt > 0) {
+                try { Thread.sleep(CONNECT_POLL_MS); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+            }
+            connected = connectIPC();
+        }
+        if (!connected) {
             attached = false;
             return "Found no mpv listening on " + path + "." + NL + NL
                  + "Start playback in Seanime first, and check the socket name matches "
@@ -342,7 +351,13 @@ public class MPVController {
                 0, null, Kernel32.OPEN_EXISTING, Kernel32.FILE_FLAG_OVERLAPPED, null);
 
         int err = k.GetLastError();
-        if (h == null || err != 0) { log.severe("CreateFile failed, error=" + err); return false; }
+        // CreateFileW reports failure as INVALID_HANDLE_VALUE, not null.
+        boolean valid = h != null && !WinBase.INVALID_HANDLE_VALUE.equals(h);
+        if (!valid || err != 0) {
+            log.severe("CreateFile failed, error=" + err);
+            if (valid) k.CloseHandle(h);
+            return false;
+        }
         pipeHandle = h;
 
         WinNT.HANDLE writeEvent = k.CreateEventW(null, true, false, null);

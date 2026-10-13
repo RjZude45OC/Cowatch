@@ -30,8 +30,9 @@ public class SyncEngine {
     private volatile boolean paused        = true;
     private volatile double  offsetSeconds = 0.0;
 
-    private long lastPosTimestamp = 0;
-    private long connectTime      = System.currentTimeMillis();
+    // Written from the FX thread, read on the mpv reader thread.
+    private volatile long lastPosTimestamp = 0;
+    private volatile long connectTime      = System.currentTimeMillis();
 
     private final AtomicBoolean suppressMpvEvents = new AtomicBoolean(false);
 
@@ -93,6 +94,23 @@ public class SyncEngine {
     public void resetWatchedTracking() {
         watchedThresholdFired.set(false);
         mediaDuration = -1.0;
+    }
+
+    /**
+     * Starts a short window in which mpv state changes are taken in but not
+     * relayed, and forgets what was loaded before.
+     *
+     * <p>Call just before connecting to a player. mpv answers each property
+     * subscription with the current value, which otherwise looks exactly like
+     * the viewer pressing play or seeking - attaching to a player that is
+     * already running would broadcast a play to the whole room.
+     */
+    public void beginQuietPeriod() {
+        connectTime          = System.currentTimeMillis();
+        lastPosTimestamp     = 0;
+        lastMediaPath        = "";
+        lastKnownPlaylistPos = -2;
+        resetWatchedTracking();
     }
 
 
@@ -334,11 +352,26 @@ public class SyncEngine {
     private void applyRemote(Runnable action) {
         suppressMpvEvents.set(true);
         action.run();
-        suppressScheduler.schedule(
-                () -> suppressMpvEvents.set(false),
-                SUPPRESS_DURATION_MS,
-                TimeUnit.MILLISECONDS
-        );
+        scheduleUnsuppress();
+    }
+
+    /**
+     * Lifts the echo suppression after {@link #SUPPRESS_DURATION_MS}.
+     *
+     * <p>Lifts it at once if this engine has been closed. The window keeps
+     * using a closed engine until the next connect replaces it, and a schedule
+     * on a shut-down executor would throw and leave suppression on for good -
+     * every later pause and seek in mpv would be silently ignored.
+     */
+    private void scheduleUnsuppress() {
+        try {
+            suppressScheduler.schedule(
+                    () -> suppressMpvEvents.set(false),
+                    SUPPRESS_DURATION_MS,
+                    TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            suppressMpvEvents.set(false);
+        }
     }
 
     // ── Public controls ───────────────────────────────────────────
@@ -383,14 +416,7 @@ public class SyncEngine {
         this.connectTime   = System.currentTimeMillis();
         log.info(String.format("Offset set to %.3fs", seconds));
 
-        if (mpv.isRunning()) {
-            suppressMpvEvents.set(true);
-            mpv.seekTo(seconds);
-            suppressScheduler.schedule(
-                    () -> suppressMpvEvents.set(false),
-                    SUPPRESS_DURATION_MS,
-                    TimeUnit.MILLISECONDS);
-        }
+        if (mpv.isRunning()) applyRemote(() -> mpv.seekTo(seconds));
     }
 
     // ── Shutdown ──────────────────────────────────────────────────
