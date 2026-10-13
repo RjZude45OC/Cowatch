@@ -201,6 +201,132 @@ public class JellyfinClient {
     public List<JellyfinItem> getEpisodes(String seasonId) { return fetchItems("Episode", seasonId); }
     public List<JellyfinItem> getMovies() { return fetchItems("Movie", ""); }
 
+    /** Every episode of a series, across all its seasons. */
+    public List<JellyfinItem> getSeriesEpisodes(String seriesId) { return fetchItems("Episode", seriesId); }
+
+    /**
+     * Finds the series or movie in this library that an AniList entry refers to.
+     *
+     * <p>Tries, in order: an AniList provider id (set by Jellyfin's AniList
+     * plugin); the other sites' ids AniZip maps the entry to, such as TVDB for
+     * a series or TMDB for a movie; an exact title; then the closest title that
+     * contains or is contained in one of {@code titles}. Anime films often have
+     * no mapped ids at all, which is what the title steps are for.
+     *
+     * @param type        "Series" or "Movie"
+     * @param anilistId   AniList media id
+     * @param providerIds Jellyfin provider name ("Tvdb", "Tmdb", "Imdb") to id;
+     *                    blank and "0" ids are ignored
+     * @param titles      titles to fall back on, compared ignoring case and punctuation
+     * @return the item, or null if nothing matched
+     */
+    public JellyfinItem findItem(String type, int anilistId, Map<String, String> providerIds,
+                                 Collection<String> titles) {
+        if (userId == null || userId.isEmpty()) return null;
+        try {
+            HttpResponse<String> res = get("/Items?userId=" + enc(userId)
+                    + "&IncludeItemTypes=" + enc(type) + "&Recursive=true"
+                    + "&Fields=ProviderIds,ProductionYear");
+            if (res.statusCode() != 200) {
+                log.warning("findItem " + type + " returned HTTP " + res.statusCode());
+                return null;
+            }
+            JSONArray items = new JSONObject(res.body()).optJSONArray("Items");
+            if (items == null) return null;
+
+            Set<String> wanted = new HashSet<>();
+            for (String t : titles) if (t != null && !t.isBlank()) wanted.add(titleKey(t));
+            wanted.remove("");
+
+            JSONObject byProvider = null, byTitle = null, byNearTitle = null;
+            int nearScore = Integer.MAX_VALUE;
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject obj = items.getJSONObject(i);
+                JSONObject ids = obj.optJSONObject("ProviderIds");
+                if (ids != null) {
+                    if (String.valueOf(anilistId).equals(providerId(ids, "AniList"))) return toItem(obj);
+                    if (byProvider == null) {
+                        for (Map.Entry<String, String> want : providerIds.entrySet()) {
+                            String v = want.getValue();
+                            if (v == null || v.isBlank() || "0".equals(v)) continue;
+                            if (v.equals(providerId(ids, want.getKey()))) { byProvider = obj; break; }
+                        }
+                    }
+                }
+                String name = titleKey(obj.optString("Name"));
+                if (byTitle == null && wanted.contains(name)) byTitle = obj;
+                int score = nearTitleScore(name, wanted);
+                if (score < nearScore) { nearScore = score; byNearTitle = obj; }
+            }
+            JSONObject hit = byProvider != null ? byProvider
+                           : byTitle    != null ? byTitle
+                           : byNearTitle;
+            return hit == null ? null : toItem(hit);
+        } catch (Exception e) {
+            log.warning("findItem failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** {@link #findItem} for a series, by AniList and TVDB id, then title. */
+    public JellyfinItem findSeries(int anilistId, int tvdbId, Collection<String> titles) {
+        return findItem("Series", anilistId,
+                Map.of("Tvdb", tvdbId > 0 ? String.valueOf(tvdbId) : ""), titles);
+    }
+
+    /**
+     * True when two title keys name the same thing: equal, or one containing
+     * the other. Release names and library names shorten and decorate titles
+     * ("Frieren" for "Sousou no Frieren"); the minimum length stops a two-letter
+     * title matching everything.
+     */
+    public static boolean titleMatches(String key, Set<String> titleKeys) {
+        return nearTitleScore(key, titleKeys) < Integer.MAX_VALUE;
+    }
+
+    /**
+     * How far {@code key} is from the nearest of {@code titleKeys}: 0 for an
+     * exact match, the length difference when one contains the other, and
+     * MAX_VALUE for no match. Lower is closer, so "Gundam Hathaway" prefers the
+     * Hathaway film over every other Gundam title containing "gundam".
+     */
+    static int nearTitleScore(String key, Set<String> titleKeys) {
+        if (key == null || key.isEmpty()) return Integer.MAX_VALUE;
+        int best = Integer.MAX_VALUE;
+        for (String t : titleKeys) {
+            if (t.equals(key)) return 0;
+            if (Math.min(t.length(), key.length()) >= 4 && (t.contains(key) || key.contains(t))) {
+                best = Math.min(best, Math.abs(t.length() - key.length()));
+            }
+        }
+        return best;
+    }
+
+    /** Provider ids are keyed by name, with casing that differs between plugins. */
+    private static String providerId(JSONObject ids, String name) {
+        for (String key : ids.keySet()) {
+            if (key.equalsIgnoreCase(name)) return ids.optString(key, "").trim();
+        }
+        return "";
+    }
+
+    /** Lowercase letters and digits only, so "Re:Zero" and "Re Zero" compare equal. */
+    public static String titleKey(String title) {
+        return title == null ? "" : title.toLowerCase(Locale.ROOT).replaceAll("[^\\p{L}\\p{N}]", "");
+    }
+
+    private static JellyfinItem toItem(JSONObject obj) {
+        return new JellyfinItem(
+                obj.optString("Id"),
+                obj.optString("Name"),
+                obj.optString("Type"),
+                obj.optString("Overview", ""),
+                obj.optInt("ProductionYear", 0),
+                obj.optInt("IndexNumber", 0),
+                obj.optInt("ParentIndexNumber", 0),
+                obj.optString("SeriesName", ""));
+    }
+
     /**
      * Fetches one item type, optionally restricted to a parent.
      *
@@ -234,17 +360,7 @@ public class JellyfinClient {
             List<JellyfinItem> result = new ArrayList<>();
 
             for (int i = 0; i < items.length(); i++) {
-                JSONObject obj = items.getJSONObject(i);
-                result.add(new JellyfinItem(
-                        obj.optString("Id"),
-                        obj.optString("Name"),
-                        obj.optString("Type"),
-                        obj.optString("Overview", ""),
-                        obj.optInt("ProductionYear", 0),
-                        obj.optInt("IndexNumber", 0),
-                        obj.optInt("ParentIndexNumber", 0),
-                        obj.optString("SeriesName", "")
-                ));
+                result.add(toItem(items.getJSONObject(i)));
             }
             return result;
 

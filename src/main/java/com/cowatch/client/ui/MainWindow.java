@@ -6,6 +6,7 @@ import com.cowatch.client.network.ServerConnection;
 import com.cowatch.client.sync.SyncEngine;
 import com.cowatch.client.ui.controllers.*;
 import com.cowatch.client.util.Async;
+import org.json.JSONObject;
 
 import javafx.application.Platform;
 import javafx.geometry.Insets;
@@ -20,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 /**
@@ -56,12 +58,23 @@ public class MainWindow {
     private final TrackingPanel    trackingPanel;
     private final SettingsPanel    settings;
 
+    /** Made on first use, once the window has its icon. */
+    private MiniPlayer miniPlayer;
+
     /** Wrappers created once; the centre is re-composed as chat toggles. */
     private final VBox centre = new VBox();
     private final VBox right  = new VBox();
 
     private boolean chatShown = false;
     private boolean sideBySide = true;
+
+    /**
+     * Bumped by every launch and attach. A waiter for a player that has since
+     * been replaced - opening the episode someone else started, say - sees a
+     * newer number when its player exits and leaves the UI alone, instead of
+     * reporting the new player closed.
+     */
+    private final AtomicInteger playerGeneration = new AtomicInteger();
 
     /** Serialises mpv IPC commands so UI clicks never block the FX thread. */
     private final ExecutorService mpvExecutor =
@@ -100,6 +113,32 @@ public class MainWindow {
 
         buildLayout();
         wireShutdown();
+
+        // Minimising during playback swaps the window for the mini player;
+        // restoring it from the taskbar swaps back.
+        stage.iconifiedProperty().addListener((obs, was, iconified) -> {
+            if (iconified && mpv.isRunning()) mini().show();
+            else if (!iconified && miniPlayer != null) miniPlayer.hide();
+        });
+    }
+
+    private MiniPlayer mini() {
+        if (miniPlayer == null) miniPlayer = new MiniPlayer(this, stage);
+        return miniPlayer;
+    }
+
+    /** Shrinks to the mini player. */
+    public void showMiniPlayer() {
+        if (!mpv.isRunning()) return;
+        stage.setIconified(true);
+        mini().show();   // in case the listener did not fire (already iconified)
+    }
+
+    /** Closes the mini player and brings the window back, when playback ends. */
+    private void closeMiniPlayer() {
+        if (miniPlayer == null || !miniPlayer.isShowing()) return;
+        miniPlayer.hide();
+        stage.setIconified(false);
     }
 
     private void wireSyncEngine() {
@@ -230,8 +269,11 @@ public class MainWindow {
                     chatPanel.appendMessage(msg);
                     noteChatActivity();
                 }));
+        server.addMessageHandler(this::onServerMedia);
 
+        mediaSeenSinceJoin = false;
         server.joinRoom(config.roomId, config.username);
+        announceIfRoomQuiet();
         headerBar.setConnected(config.serverHost, config.roomId);
         configPanel.onConnected();
         // The settings drawer has served its purpose once a room is joined.
@@ -262,8 +304,85 @@ public class MainWindow {
         systemMessage("Lost the connection to the server. Reconnect from Settings.");
     }
 
+    /**
+     * Someone in the room started an episode. Opens the same one here, from
+     * this viewer's own source, when following the room is switched on.
+     *
+     * <p>Runs on the server reader thread; the age of the frame is worked out
+     * here, at receipt, so later delays opening the episode are measured on
+     * this machine's clock rather than compared against the server's.
+     */
+    private void onServerMedia(String raw) {
+        if (raw.isBlank() || !raw.contains("\"media\"")) return;
+        try {
+            JSONObject msg = new JSONObject(raw);
+            if (!"media".equals(msg.optString("event"))) return;
+            mediaSeenSinceJoin = true;
+            int anilistId = msg.optInt("anilistId", 0);
+            int episode   = msg.optInt("episode", 0);
+            if (anilistId <= 0 || episode <= 0) return;
+
+            boolean paused   = msg.optBoolean("paused", true);
+            double  position = Math.max(0, msg.optDouble("position", 0));
+            long    now      = System.currentTimeMillis();
+            if (!paused) {
+                // Same transit allowance as play and seek frames get.
+                double age = (now - msg.optLong("serverTime", now)) / 1000.0;
+                position += Math.max(0, Math.min(age, 5.0));
+            }
+            MediaPanel.PeerMedia peer = new MediaPanel.PeerMedia(anilistId, episode,
+                    msg.optString("title", ""), msg.optString("from", "someone"),
+                    position, paused, now);
+            Platform.runLater(() -> {
+                if (configPanel.isFollowRoom()) mediaPanel.followPeer(peer);
+            });
+        } catch (Exception e) {
+            // Chat already shows the raw frame; nothing to open.
+        }
+    }
+
+    /**
+     * Tells the room about a player cowatch just attached to, once it has
+     * reported where it is.
+     *
+     * <p>Seanime names the episode before cowatch can attach, when there is no
+     * position to send yet, so the announcement waits for this. With the
+     * player held paused, the room hears the pause first, so anyone already
+     * watching stops too instead of running on alone.
+     */
+    private void announceAttached(SyncEngine engine, boolean paused) {
+        Async.run("seanime-announce", () -> {
+            try { Thread.sleep(500); } catch (InterruptedException e) { return; }
+            if (paused) engine.sendPauseToRoom();
+            Platform.runLater(mediaPanel::reannounce);
+        });
+    }
+
+    /** Set by any "media" frame; read once, shortly after joining a room. */
+    private volatile boolean mediaSeenSinceJoin = false;
+
+    /**
+     * Tells a room that has nothing on what this player already has open.
+     *
+     * <p>The server replays the room's episode to anyone who joins, so a moment
+     * after joining this client knows whether the room is watching something.
+     * If it is, the replay lines this player up with it. If not, and a player
+     * is open here, this player's episode and position become the room's - so
+     * two people who started watching before connecting end up in sync instead
+     * of drifting until someone pauses.
+     */
+    private void announceIfRoomQuiet() {
+        Async.run("announce-on-join", () -> {
+            try { Thread.sleep(1_500); } catch (InterruptedException e) { return; }
+            Platform.runLater(() -> {
+                if (!server.isConnected() || mediaSeenSinceJoin || !mpv.isRunning()) return;
+                mediaPanel.reannounce();
+            });
+        });
+    }
+
     /** Logs an app event to the chat transcript and flags it if chat is hidden. */
-    private void systemMessage(String text) {
+    public void systemMessage(String text) {
         chatPanel.appendRaw("[system] " + text);
         noteChatActivity();
     }
@@ -302,6 +421,7 @@ public class MainWindow {
      * @param okMessage chat line shown when the launch succeeds
      */
     private void launch(Supplier<String> starter, String okMessage) {
+        final int generation = playerGeneration.incrementAndGet();
         Async.run("mpv-launcher", () -> {
             String error = starter.get();
             Platform.runLater(() -> {
@@ -321,6 +441,7 @@ public class MainWindow {
                     Thread.currentThread().interrupt();
                     return;
                 }
+                if (generation != playerGeneration.get()) return;   // replaced, not closed
                 Platform.runLater(this::onMpvClosed);
             }
         });
@@ -340,11 +461,31 @@ public class MainWindow {
      *                   thread; the first that answers wins
      */
     public void onAttachToSeanime(Supplier<List<String>> candidates) {
+        onAttachToSeanime(candidates, false);
+    }
+
+    /**
+     * @param quiet true for an attach cowatch started on its own, on seeing
+     *              Seanime open a player: a failure is logged, not shown in a
+     *              dialog, since nobody asked for it and it will be retried
+     */
+    public void onAttachToSeanime(Supplier<List<String>> candidates, boolean quiet) {
         // Attaching mid-episode reports mpv's current state as if it had just
         // changed. Nobody pressed anything, so the room must not hear about it.
         syncEngine.beginQuietPeriod();
+        final int generation = playerGeneration.incrementAndGet();
+        // Seanime starts its player playing. Honour "open paused" for a player
+        // cowatch found by itself, unless it is opening to join someone, in
+        // which case their pause state wins.
+        final boolean following  = syncEngine.hasPendingJoin();
+        final boolean holdPaused = quiet && startPaused() && !following;
+        final SyncEngine engine  = syncEngine;
         Async.run("seanime-attach", () -> {
             List<String> socketPaths = candidates.get();
+            if (quiet && socketPaths.isEmpty()) {
+                Platform.runLater(() -> mediaPanel.onSeanimeAttached(false));
+                return;
+            }
             String found = socketPaths.isEmpty()
                     ? "No Seanime player is running." + System.lineSeparator() + System.lineSeparator()
                       + "Start the episode in Seanime first, with mpv as its media player, "
@@ -355,12 +496,20 @@ public class MainWindow {
                 if (found == null) break;
             }
             final String error = found;
+            // Pause straight from this thread, before anything queues behind
+            // the FX thread: every moment here is the episode running on.
+            if (error == null && holdPaused) engine.pauseQuietly();
             Platform.runLater(() -> {
                 boolean ok = (error == null);
                 mediaPanel.onSeanimeAttached(ok);
                 if (ok) {
                     playbackControls.setEnabled(true);
-                    systemMessage("Attached to the mpv window Seanime opened");
+                    systemMessage("Attached to the mpv window Seanime opened"
+                            + (holdPaused ? startNote(true) : ""));
+                    if (!following) announceAttached(engine, holdPaused);
+                } else if (quiet) {
+                    java.util.logging.Logger.getLogger(MainWindow.class.getName())
+                            .fine("Automatic Seanime attach failed: " + error);
                 } else {
                     showError("Could not attach to Seanime playback", error);
                 }
@@ -373,7 +522,9 @@ public class MainWindow {
                 Thread.currentThread().interrupt();
                 return;
             }
+            if (generation != playerGeneration.get()) return;   // replaced, not closed
             Platform.runLater(() -> {
+                closeMiniPlayer();
                 playbackControls.setEnabled(false);
                 systemMessage("Seanime's mpv window closed");
                 mediaPanel.onSeanimeAttached(false);
@@ -388,9 +539,11 @@ public class MainWindow {
      * viewer streaming from Jellyfin and one playing a Seanime download can be
      * talking about the same episode.
      */
-    public void announceMedia(int anilistId, int episode, String title, String source) {
-        if (!server.isConnected()) return;
-        server.sendMedia(anilistId, episode, title, source);
+    public boolean announceMedia(int anilistId, int episode, String title, String source) {
+        if (!server.isConnected()) return false;
+        server.sendMedia(anilistId, episode, title, source,
+                syncEngine.getRemotePosition(), syncEngine.isPaused());
+        return true;
     }
 
     // --- Next episode (IPC only) ------------------------------------------
@@ -406,6 +559,7 @@ public class MainWindow {
     }
 
     private void onMpvClosed() {
+        closeMiniPlayer();
         playbackControls.setEnabled(false);
         systemMessage("MPV closed");
         mediaPanel.onMpvClosed(true);
@@ -414,7 +568,14 @@ public class MainWindow {
     /** Shows what is playing on the transport bar; see {@link PlaybackControls#setNowPlaying}. */
     public void setNowPlaying(String show, String episode) {
         playbackControls.setNowPlaying(show, episode);
+        mini().setNowPlaying(show, episode);
     }
+
+    /** Whether mpv last reported itself paused. */
+    public boolean isPaused() { return syncEngine.isPaused(); }
+
+    /** True while an mpv window, launched or attached, is open. */
+    public boolean isPlayerOpen() { return mpv.isRunning(); }
 
     // --- Panel accessors --------------------------------------------------
 
@@ -469,6 +630,11 @@ public class MainWindow {
     // --- Playback actions -------------------------------------------------
 
     public void doPlay()                 { mpvExecutor.submit(() -> syncEngine.localPlay()); }
+
+    /** The single play/pause button: plays when paused, pauses when playing. */
+    public void doPlayPause() {
+        if (syncEngine.isPaused()) doPlay(); else doPause();
+    }
     public void doPause()                { mpvExecutor.submit(() -> syncEngine.localPause()); }
     public void doSeek(double pos)       { mpvExecutor.submit(() -> syncEngine.localSeek(pos)); }
     public void doSkipForward(double s)  { mpvExecutor.submit(() -> syncEngine.localSkipForward(s)); }
@@ -502,6 +668,7 @@ public class MainWindow {
 
     private void wireShutdown() {
         stage.setOnCloseRequest(e -> {
+            if (miniPlayer != null) miniPlayer.hide();
             mediaPanel.shutdown();
             mpvExecutor.shutdownNow();
             syncEngine.close();

@@ -1,6 +1,7 @@
 package com.cowatch.client.ui.controllers;
 
 import com.cowatch.client.ui.MainWindow;
+import com.cowatch.client.ui.MiniPlayer;
 import com.cowatch.client.ui.Motion;
 
 import javafx.animation.Animation;
@@ -15,7 +16,7 @@ import javafx.util.Duration;
 /**
  * The transport bar pinned to the bottom of the window while mpv is running:
  *
- * <pre>Show name                 00:14:32 / 00:23:40  [-30] [-5] [play] [pause] [+5] [+30] [...]
+ * <pre>Show name                 00:14:32 / 00:23:40  [-30] [-5] [play/pause] [+5] [+30] [mini] [...]
  * Episode 7</pre>
  *
  * <p>Previously a tall card in a permanent side column. It is now one row, and
@@ -33,8 +34,9 @@ public class PlaybackControls {
     private final OffsetPanel offsetPanel;
     private final HBox node = new HBox(6);
 
-    private final Button playBtn   = transportBtn("\u25B6",   "Play");
-    private final Button pauseBtn  = transportBtn("\u23F8",   "Pause");
+    /** One button for play and pause; shows what pressing it will do. */
+    private final Button playBtn   = transportBtn("\u25B6",   "Play / pause");
+    private final Button miniBtn   = transportBtn("\u2198",   "Mini player: shrink to a small always-on-top strip");
     private final Button back5Btn  = transportBtn("\u21BA5",  "Back 5 seconds");
     private final Button fwd5Btn   = transportBtn("5\u21BB",  "Forward 5 seconds");
     private final Button back30Btn = transportBtn("\u21BA30", "Back 30 seconds");
@@ -61,10 +63,9 @@ public class PlaybackControls {
 
     private void build() {
         playBtn.getStyleClass().add("green");
-        pauseBtn.getStyleClass().add("red");
 
-        playBtn.setOnAction(e   -> owner.doPlay());
-        pauseBtn.setOnAction(e  -> owner.doPause());
+        playBtn.setOnAction(e   -> owner.doPlayPause());
+        miniBtn.setOnAction(e   -> owner.showMiniPlayer());
         back30Btn.setOnAction(e -> owner.doSkipBackward(30));
         back5Btn.setOnAction(e  -> owner.doSkipBackward(5));
         fwd5Btn.setOnAction(e   -> owner.doSkipForward(5));
@@ -73,7 +74,7 @@ public class PlaybackControls {
         posLabel.getStyleClass().add("position-value");
         posLabel.setMinWidth(Region.USE_PREF_SIZE);
 
-        HBox transport = new HBox(4, back30Btn, back5Btn, playBtn, pauseBtn, fwd5Btn, fwd30Btn);
+        HBox transport = new HBox(4, back30Btn, back5Btn, playBtn, fwd5Btn, fwd30Btn, miniBtn);
         transport.setAlignment(Pos.CENTER);
 
         // What is playing sits on the left and gives way first when the window
@@ -188,6 +189,7 @@ public class PlaybackControls {
         String pos = formatTime(owner.getPosition());
         double duration = owner.getDuration();
         posLabel.setText(duration > 0 ? pos + " / " + formatTime(duration) : pos);
+        MiniPlayer.setPlayGlyph(playBtn, owner.isPaused());
     }
 
     private static String formatTime(double seconds) {
@@ -222,7 +224,7 @@ public class PlaybackControls {
      * buttons is worse than no row, and the window gets the height back.
      */
     public void setEnabled(boolean enabled) {
-        for (Node n : new Node[] { playBtn, pauseBtn, back5Btn, fwd5Btn,
+        for (Node n : new Node[] { playBtn, miniBtn, back5Btn, fwd5Btn,
                                    back30Btn, fwd30Btn, seekBtn, seekField, moreBtn }) {
             n.setDisable(!enabled);
         }

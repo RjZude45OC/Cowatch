@@ -147,9 +147,16 @@ public class ServerConnection {
      * Seanime auto-downloader fetched. A path would mean nothing on the other
      * side; an AniList id each client resolves against its own library does.
      *
-     * @param source where this client got the episode: "jellyfin", "seanime" or "local"
+     * <p>Position and pause state let the others open the episode at the same
+     * point instead of at its start. A server that predates them drops both
+     * fields, and receivers then start from zero.
+     *
+     * @param source   where this client got the episode: "jellyfin", "seanime" or "local"
+     * @param position seconds into the episode, in the room's timeline
+     * @param paused   whether this client is paused
      */
-    public void sendMedia(int anilistId, int episode, String title, String source) {
+    public void sendMedia(int anilistId, int episode, String title, String source,
+                          double position, boolean paused) {
         if (anilistId <= 0) return;   // nothing the other side could resolve
         send(new JSONObject()
                 .put("event",     "media")
@@ -157,6 +164,8 @@ public class ServerConnection {
                 .put("episode",   episode)
                 .put("title",     title  == null ? "" : title)
                 .put("source",    source == null ? "" : source)
+                .put("position",  Math.round(Math.max(0, position) * 1000.0) / 1000.0)
+                .put("paused",    paused)
                 .toString());
     }
 

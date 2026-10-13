@@ -267,7 +267,8 @@ public class SeanimeClient {
         }
         List<String> sockets = new ArrayList<>(found.keySet());
         sockets.sort(Comparator.comparingLong((String s) -> found.get(s)).reversed());
-        log.info("Seanime mpv sockets found: " + sockets);
+        // Polled every couple of seconds while waiting for a player, so fine.
+        log.fine("Seanime mpv sockets found: " + sockets);
         return sockets;
     }
 
@@ -372,6 +373,20 @@ public class SeanimeClient {
                 .put("episodeNumber", episode)
                 .put("clientId",      "cowatch");
         return post("/playback-manager/manual-tracking/start", body.toString());
+    }
+
+    /**
+     * Asks Seanime to open a library file in its media player, as if the viewer
+     * had pressed play on it in Seanime.
+     *
+     * <p>Seanime then launches mpv and tracks progress itself, exactly as for
+     * playback started from its own UI, and cowatch attaches to that player.
+     *
+     * @param path the file's path as Seanime's library lists it
+     * @return null on success, or the reason it failed
+     */
+    public String playFile(String path) {
+        return post("/playback-manager/play", new JSONObject().put("path", path).toString());
     }
 
     /** Flushes tracked progress to AniList through Seanime. */
