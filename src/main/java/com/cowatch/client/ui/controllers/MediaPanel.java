@@ -1302,6 +1302,23 @@ public class MediaPanel {
     }
 
     /** Stops background work. Called when the window closes. */
+    // --- Debug console readouts -------------------------------------------
+
+    public SyncMode getMode() { return currentMode; }
+
+    /** One line on the Seanime connection, for the debug console. FX thread. */
+    public String describeSeanime() {
+        SeanimeClient client = seanimeClient;
+        if (client == null) return "not connected (" + seanimeStatus.getText() + ")";
+        SeanimeEvents events = seanimeEvents;
+        return "connected to " + client.getBaseUrl()
+                + (client.getVersion().isEmpty() ? "" : ", v" + client.getVersion())
+                + ", player " + client.getDefaultPlayer()
+                + ", events " + (events != null && events.isOpen() ? "open" : "closed")
+                + ", library " + seanimeLibrary.size() + " files"
+                + (seanimeAttached ? ", attached" : "");
+    }
+
     public void shutdown() {
         stopSeanimeEvents();
         progressScheduler.shutdownNow();

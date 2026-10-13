@@ -536,6 +536,9 @@ public class MPVController {
     /** True when driving an mpv started by something else. */
     public boolean isAttached() { return attached; }
 
+    /** The IPC socket or pipe in use, for the debug console. */
+    public String getSocketPath() { return currentSocketPath; }
+
     // ── RESET + SHUTDOWN ─────────────────────────────────────────
 
     private void reset() {
