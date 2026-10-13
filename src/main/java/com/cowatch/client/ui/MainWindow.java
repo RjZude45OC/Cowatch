@@ -26,7 +26,7 @@ import java.util.function.Supplier;
  * <p>The window is deliberately thin: a header, the media browser, and a
  * transport bar that appears only while mpv runs. Chat is an optional second
  * column, and the server / sync-mode / tracking settings live in
- * {@link SettingsDialog}. Everything that a session configures once is one
+ * {@link SettingsPanel}, a drawer that slides in from the right. Everything that a session configures once is one
  * click away rather than permanently on screen, which is what lets the window
  * open at roughly two thirds of its old size.
  */
@@ -52,7 +52,7 @@ public class MainWindow {
     private final PlaybackControls playbackControls;
     private final OffsetPanel      offsetPanel;
     private final TrackingPanel    trackingPanel;
-    private final SettingsDialog   settings;
+    private final SettingsPanel    settings;
 
     /** Wrappers created once; the centre is re-composed as chat toggles. */
     private final VBox centre = new VBox();
@@ -77,14 +77,20 @@ public class MainWindow {
         playbackControls = new PlaybackControls(this, offsetPanel);
         chatPanel        = new ChatPanel(server);
         trackingPanel    = new TrackingPanel(this);
-        settings         = new SettingsDialog(stage, configPanel, trackingPanel);
+        settings         = new SettingsPanel(configPanel, trackingPanel);
 
         wireSyncEngine();
         // Registered once, not per connection - re-registering on every
         // connect would stack handlers and run the teardown repeatedly.
         headerBar.setOnDisconnect(this::onDisconnect);
         headerBar.setOnConnect(() -> settings.show(0));
-        headerBar.setOnOpenSettings(settings::show);
+        headerBar.setOnOpenSettings(settings::toggle);
+        settings.setOnShownChanged(() -> {
+            headerBar.setSettingsShown(settings.isShown());
+            // Narrow windows give the drawer the whole width (see refreshCentre)
+            if (settings.isShown() && !sideBySide) refreshCentre();
+        });
+        settings.setOnClosed(() -> { if (!sideBySide) refreshCentre(); });
         headerBar.setOnToggleChat(this::toggleChat);
 
         // Show the media source the saved settings pick, not always Jellyfin.
@@ -109,6 +115,7 @@ public class MainWindow {
         root.getStyleClass().add("app-root");
         root.setTop(headerBar.getNode());
         root.setBottom(playbackControls.getNode());
+        root.setRight(settings.getNode());
 
         centre.setPadding(new Insets(10));
         centre.setFillWidth(true);
@@ -161,9 +168,14 @@ public class MainWindow {
      * Puts the right thing in the centre for the current chat state and width.
      *
      * <p>Narrow windows swap chat in for the media panel rather than squeezing
-     * both into a split - two 190px columns are worse than one usable one.
+     * both into a split - two 190px columns are worse than one usable one. The
+     * settings drawer does the same: narrow, it replaces the centre while open.
      */
     private void refreshCentre() {
+        if (settings.isShown() && !sideBySide) {
+            root.setCenter(null);
+            return;
+        }
         if (!chatShown) {
             root.setCenter(centre);
         } else if (sideBySide) {
@@ -220,7 +232,7 @@ public class MainWindow {
         server.joinRoom(config.roomId, config.username);
         headerBar.setConnected(config.serverHost, config.roomId);
         configPanel.onConnected();
-        // The settings window has served its purpose once a room is joined.
+        // The settings drawer has served its purpose once a room is joined.
         settings.hide();
         mediaPanel.setMode(config.mode);
 
@@ -384,6 +396,11 @@ public class MainWindow {
         mediaPanel.onMpvClosed(true);
     }
 
+    /** Shows what is playing on the transport bar; see {@link PlaybackControls#setNowPlaying}. */
+    public void setNowPlaying(String show, String episode) {
+        playbackControls.setNowPlaying(show, episode);
+    }
+
     // --- Panel accessors --------------------------------------------------
 
     public MediaPanel    getMediaPanel()    { return mediaPanel; }
@@ -431,7 +448,6 @@ public class MainWindow {
 
     private void wireShutdown() {
         stage.setOnCloseRequest(e -> {
-            settings.hide();
             mediaPanel.shutdown();
             mpvExecutor.shutdownNow();
             syncEngine.close();

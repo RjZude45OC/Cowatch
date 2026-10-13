@@ -39,6 +39,7 @@ jobs:
             --win-dir-chooser `
             --win-shortcut `
             --win-menu `
+            --icon src/main/resources/icons/icon.ico `
             --type exe `
             --dest dist
         shell: pwsh
@@ -52,6 +53,8 @@ jobs:
             --main-class com.cowatch.client.Launcher \
             --name cowatch \
             --app-version 1.0 \
+            --icon src/main/resources/icons/icon.png \
+            --linux-shortcut \
             --type deb \
             --dest dist
 
@@ -66,6 +69,7 @@ jobs:
             --main-class com.cowatch.client.Launcher \
             --name cowatch \
             --app-version 1.0 \
+            --icon src/main/resources/icons/icon.icns \
             --type dmg \
             --dest dist
 

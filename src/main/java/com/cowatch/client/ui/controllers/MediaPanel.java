@@ -335,6 +335,29 @@ public class MediaPanel {
         boolean hasNext = currentIndex < total - 1;
         nextLocalBtn.setDisable(!hasNext);
         nextJfBtn.setDisable(!hasNext);
+        publishNowPlaying(isJellyfin);
+    }
+
+    /**
+     * Names the current playlist entry on the transport bar. Jellyfin knows the
+     * series and episode outright; local files go through the same filename
+     * parser the AniList reporting uses.
+     */
+    private void publishNowPlaying(boolean isJellyfin) {
+        if (isJellyfin) {
+            if (currentIndex >= jfEpisodeList.size()) return;
+            JellyfinItem item = jfEpisodeList.get(currentIndex);
+            String show = item.seriesName().isBlank() ? item.name() : item.seriesName();
+            String ep = item.episodeNumber() <= 0 ? item.name()
+                    : (item.seasonNumber() > 1 ? "Season " + item.seasonNumber() + " · " : "")
+                      + "Episode " + item.episodeNumber();
+            owner.setNowPlaying(show, ep);
+        } else if (currentIndex < playlistEntries.size()) {
+            String path = playlistEntries.get(currentIndex);
+            ParsedInfo info = parseFilename(path);
+            String show = info.title().isBlank() ? new File(path).getName() : info.title();
+            owner.setNowPlaying(show, "Episode " + info.episode());
+        }
     }
 
     private void handleNextEpisode(boolean isJellyfin) {
@@ -1243,6 +1266,7 @@ public class MediaPanel {
         String name = title.isBlank() ? filename : title;
         nowPlayingLabel.setText((name.isBlank() ? "AniList " + anilistId : name)
                 + "  ·  Episode " + episode);
+        owner.setNowPlaying(name.isBlank() ? "AniList " + anilistId : name, "Episode " + episode);
 
         String key = anilistId + ":" + episode;
         if (key.equals(lastAnnouncedKey)) return;

@@ -17,7 +17,7 @@ import java.util.Properties;
 /**
  * AniList token settings.
  *
- * <p>A tab in {@link com.cowatch.client.ui.SettingsDialog}. It used to be a
+ * <p>A tab in {@link com.cowatch.client.ui.SettingsPanel}. It used to be a
  * collapsible card in the main window's left column, which meant a form that is
  * filled in once per install occupied permanent screen space; the collapsible
  * wrapper it needed for that is gone with it.
