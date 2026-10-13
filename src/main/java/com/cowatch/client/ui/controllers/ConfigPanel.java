@@ -18,7 +18,8 @@ import java.util.Properties;
  * Sections:
  *  1. Sync mode selector
  *  2. Connection card: host, port, username  (room removed — server handles rooms)
- *  3. Connect + Save buttons
+ *  3. Playback: whether mpv starts playing or opens paused
+ *  4. Connect + Save buttons
  * Settings are persisted via {@link AppPrefs}, in the platform's per-user
  * configuration directory.
  */
@@ -35,6 +36,8 @@ public class ConfigPanel {
     private final TextField hostField = field("localhost");
     private final TextField portField = field("5555");
     private final TextField userField = field("User1");
+
+    private final ComboBox<StartBehavior> startBox = new ComboBox<>();
 
     private final Button connectBtn = new Button("Connect");
     private final Button saveBtn    = new Button("Save");
@@ -86,7 +89,22 @@ public class ConfigPanel {
                 hostRow,
                 labeled("Username", userField));
 
-        // ── 3. Action row: Connect + Save ─────────────────────────────
+        // ── 3. Playback card ──────────────────────────────────────────
+        // Read at each launch, so a change applies to the next player opened.
+        StartBehavior restored = startBox.getValue();
+        startBox.getItems().setAll(StartBehavior.values());
+        startBox.setValue(restored != null ? restored : StartBehavior.AUTO);
+        Label startHint = new Label("In a room, starting paused lets everyone load the "
+                + "episode before one person presses play.");
+        startHint.getStyleClass().add("muted");
+        startHint.setWrapText(true);
+
+        VBox playCard = card(
+                heading("Playback"),
+                labeled("When mpv opens", startBox),
+                startHint);
+
+        // ── 4. Action row: Connect + Save ─────────────────────────────
         connectBtn.getStyleClass().add("accent");
         connectBtn.setMaxWidth(Double.MAX_VALUE);
         connectBtn.setOnAction(e -> handleConnect());
@@ -98,7 +116,7 @@ public class ConfigPanel {
         HBox actionRow = new HBox(8, connectBtn, saveBtn);
         actionRow.setFillHeight(true);
 
-        node.getChildren().addAll(modeCard, connCard, actionRow);
+        node.getChildren().addAll(modeCard, connCard, playCard, actionRow);
     }
 
     // ── Handlers ─────────────────────────────────────────────────────────
@@ -145,6 +163,12 @@ public class ConfigPanel {
 
     /** The sync mode picked here, including one restored from saved settings. */
     public SyncMode getSelectedMode() { return selectedMode; }
+
+    /** Whether mpv should play or open paused, as chosen here. */
+    public StartBehavior getStartBehavior() {
+        StartBehavior b = startBox.getValue();
+        return b != null ? b : StartBehavior.AUTO;
+    }
     public void onDisconnected() { connectBtn.setDisable(false); connectBtn.setText("Connect"); }
 
     // ── Preferences persistence ───────────────────────────────────────────
@@ -155,6 +179,7 @@ public class ConfigPanel {
         p.setProperty("port",     portField.getText().trim());
         p.setProperty("username", userField.getText().trim());
         p.setProperty("mode",     selectedMode.name());
+        p.setProperty("start",    getStartBehavior().name());
 
         try {
             AppPrefs.save(PREFS_FILE, p, "cowatch settings");
@@ -173,6 +198,11 @@ public class ConfigPanel {
             selectedMode = SyncMode.valueOf(p.getProperty("mode", selectedMode.name()));
         } catch (IllegalArgumentException ignored) {
             // Unknown mode in an older or hand-edited file — keep the default.
+        }
+        try {
+            startBox.setValue(StartBehavior.valueOf(p.getProperty("start", "AUTO")));
+        } catch (IllegalArgumentException ignored) {
+            startBox.setValue(StartBehavior.AUTO);
         }
     }
 

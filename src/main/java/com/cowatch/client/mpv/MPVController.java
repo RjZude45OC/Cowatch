@@ -144,8 +144,8 @@ public class MPVController {
      * Launch MPV with a single file or URL.
      * @return null on success, human-readable error on failure.
      */
-    public String launch(String fileOrUrl) {
-        return launch(List.of(fileOrUrl), 0);
+    public String launch(String fileOrUrl, boolean startPaused) {
+        return launch(List.of(fileOrUrl), 0, startPaused);
     }
 
     /**
@@ -154,9 +154,10 @@ public class MPVController {
      *
      * @param entries    ordered list of file paths or URLs
      * @param startIndex 0-based index of the episode to start from
+     * @param startPaused open paused and wait for play, rather than play at once
      * @return null on success, human-readable error on failure.
      */
-    public String launch(List<String> entries, int startIndex) {
+    public String launch(List<String> entries, int startIndex, boolean startPaused) {
         if (entries == null || entries.isEmpty()) return "No media entries provided.";
         reset();
         currentSocketPath = (isWindows()
@@ -179,7 +180,7 @@ public class MPVController {
             List<String> cmd = new ArrayList<>();
             cmd.add(bin);
             cmd.add("--input-ipc-server=" + currentSocketPath);
-            cmd.add("--pause");
+            if (startPaused) cmd.add("--pause");
             cmd.add("--force-window=immediate");
             cmd.add("--keep-open=yes");
             cmd.add("--quiet");
