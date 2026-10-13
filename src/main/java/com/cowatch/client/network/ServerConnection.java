@@ -21,6 +21,8 @@ public class ServerConnection {
     private PrintWriter out;
     private Thread readerThread;
     private volatile boolean connected = false;
+    private volatile String endpoint = "";
+    private volatile String room = "";
 
     /** Told when the server drops the connection without being asked to. */
     private volatile Runnable onConnectionLost;
@@ -42,6 +44,7 @@ public class ServerConnection {
                     new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true);
             startReaderThread();
             connected = true;
+            endpoint = host + ":" + port;
             log.info("Connected to server: " + host + ":" + port);
             return true;
         } catch (IOException | IllegalArgumentException e) {
@@ -115,6 +118,7 @@ public class ServerConnection {
     }
 
     public void joinRoom(String roomId, String username) {
+        room = roomId + " as " + username;
         send(new JSONObject()
                 .put("event",    "join")
                 .put("room",     roomId)
@@ -182,6 +186,12 @@ public class ServerConnection {
     }
 
     public boolean isConnected() { return connected; }
+
+    /** host:port of the last connection, for the debug console. */
+    public String getEndpoint() { return endpoint; }
+
+    /** Room and username of the last join, for the debug console. */
+    public String getRoom() { return room; }
 
     /**
      * Registers a callback for the server closing the connection on its own.

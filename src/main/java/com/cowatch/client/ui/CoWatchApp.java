@@ -1,11 +1,13 @@
 package com.cowatch.client.ui;
 
 import com.cowatch.client.util.Async;
+import com.cowatch.client.util.LogBuffer;
 
 import javafx.application.Application;
 import javafx.scene.Scene;
 import javafx.scene.image.Image;
 import javafx.stage.Stage;
+import javafx.stage.WindowEvent;
 
 import java.io.InputStream;
 import java.net.URL;
@@ -38,6 +40,12 @@ public class CoWatchApp extends Application {
         if (css != null) scene.getStylesheets().add(css.toExternalForm());
         else log.warning("Stylesheet not found on classpath: " + CSS_PATH);
 
+        // Ctrl+` (or F12) opens the log and live state. It must not outlive the
+        // main window, or closing cowatch would leave the JVM running behind it.
+        DebugConsole console = new DebugConsole(stage, window::debugInfo);
+        DebugConsole.installToggleKey(scene, console::toggle);
+        stage.addEventHandler(WindowEvent.WINDOW_HIDDEN, e -> console.close());
+
         stage.setTitle("cowatch");
         addIcons(stage);
         stage.setScene(scene);
@@ -68,6 +76,7 @@ public class CoWatchApp extends Application {
     }
 
     public static void main(String[] args) {
+        LogBuffer.install();
         launch(args);
     }
 }

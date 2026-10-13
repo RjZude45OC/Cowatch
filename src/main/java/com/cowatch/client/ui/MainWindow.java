@@ -16,7 +16,9 @@ import javafx.stage.Stage;
 
 import java.io.IOException;
 import java.net.URL;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -585,6 +587,45 @@ public class MainWindow {
 
     /** Length of what mpv is playing, in seconds, or -1 while unknown. */
     public double getDuration() { return syncEngine.getDuration(); }
+
+    // --- Debug console ----------------------------------------------------
+
+    /**
+     * Live state for the debug console's header, as label/value pairs.
+     * Called on the FX thread a couple of times a second.
+     */
+    public Map<String, String> debugInfo() {
+        Map<String, String> info = new LinkedHashMap<>();
+        info.put("Server", server.isConnected()
+                ? "connected to " + server.getEndpoint() + ", room " + server.getRoom()
+                : "disconnected" + (server.getEndpoint().isEmpty() ? "" : " (last " + server.getEndpoint() + ")"));
+
+        String mpvState = mpv.isRunning()
+                ? (mpv.isAttached() ? "attached" : "launched") + " on " + mpv.getSocketPath()
+                : "not running";
+        info.put("mpv", mpvState);
+
+        SyncEngine sync = syncEngine;
+        double dur = sync.getDuration();
+        info.put("Sync", (sync.isSynced() ? "synced to room" : "local only")
+                + ", " + (sync.isPaused() ? "paused" : "playing")
+                + String.format(" at %.2fs / %s", sync.getPosition(),
+                        dur < 0 ? "?" : String.format("%.2fs", dur))
+                + String.format(", offset %+.3fs", sync.getOffset())
+                + (sync.isSuppressing() ? ", applying remote" : "")
+                + (sync.isInQuietPeriod() ? ", quiet window" : ""));
+
+        info.put("Mode", String.valueOf(mediaPanel.getMode())
+                + ", start " + configPanel.getStartBehavior());
+        info.put("Seanime", mediaPanel.describeSeanime());
+
+        Runtime rt = Runtime.getRuntime();
+        long usedMb = (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024);
+        info.put("JVM", "Java " + System.getProperty("java.version")
+                + ", heap " + usedMb + " / " + rt.maxMemory() / (1024 * 1024) + " MB"
+                + ", threads " + Thread.activeCount());
+        return info;
+    }
 
     // --- Playback actions -------------------------------------------------
 

@@ -786,3 +786,46 @@
     -fx-border-radius:     10;
     -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.45), 14, 0.2, 0, 3);
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   DEBUG CONSOLE  (Ctrl+`)
+   ════════════════════════════════════════════════════════════════════════════ */
+
+.debug-state {
+    -fx-background-color:  -sp-surface;
+    -fx-background-radius: 8px;
+    -fx-border-color:      -sp-border-dim;
+    -fx-border-radius:     8px;
+}
+
+.debug-state-key   { -fx-text-fill: -sp-text-dim; -fx-font-weight: bold; }
+.debug-state-value,
+.debug-row {
+    -fx-font-family: "Consolas", "JetBrains Mono", "Menlo", "Courier New", monospace;
+    -fx-font-size:   12px;
+}
+
+.toggle-button.debug-chip {
+    -fx-background-color:  -sp-surface2;
+    -fx-text-fill:         -sp-text-dim;
+    -fx-background-radius: 12px;
+    -fx-padding:           3px 10px;
+}
+.toggle-button.debug-chip:selected {
+    -fx-background-color: -sp-accent-dim;
+    -fx-text-fill:        -sp-text;
+}
+
+.list-view.debug-log {
+    -fx-background-color: -sp-surface;
+    -fx-border-color:     -sp-border-dim;
+}
+.debug-log .list-cell.debug-row {
+    -fx-background-color: transparent;
+    -fx-padding:          1px 6px;
+}
+.debug-log .list-cell.debug-row:selected  { -fx-background-color: -sp-accent-dim; }
+.debug-log .list-cell.debug-level-severe  { -fx-text-fill: -sp-red; }
+.debug-log .list-cell.debug-level-warning { -fx-text-fill: -sp-yellow; }
+.debug-log .list-cell.debug-level-info    { -fx-text-fill: -sp-text; }
+.debug-log .list-cell.debug-level-fine    { -fx-text-fill: -sp-text-dim; }

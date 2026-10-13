@@ -66,6 +66,9 @@ public class SeanimeEvents implements WebSocket.Listener {
         this.onStopped  = onStopped;
     }
 
+    /** True while the live-events WebSocket is open. */
+    public boolean isOpen() { return socket != null; }
+
     public void start() {
         retry.execute(this::open);
     }
