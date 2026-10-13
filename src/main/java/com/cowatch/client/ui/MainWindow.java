@@ -240,7 +240,9 @@ public class MainWindow {
                 }));
         server.addMessageHandler(this::onServerMedia);
 
+        mediaSeenSinceJoin = false;
         server.joinRoom(config.roomId, config.username);
+        announceIfRoomQuiet();
         headerBar.setConnected(config.serverHost, config.roomId);
         configPanel.onConnected();
         // The settings drawer has served its purpose once a room is joined.
@@ -284,6 +286,7 @@ public class MainWindow {
         try {
             JSONObject msg = new JSONObject(raw);
             if (!"media".equals(msg.optString("event"))) return;
+            mediaSeenSinceJoin = true;
             int anilistId = msg.optInt("anilistId", 0);
             int episode   = msg.optInt("episode", 0);
             if (anilistId <= 0 || episode <= 0) return;
@@ -305,6 +308,29 @@ public class MainWindow {
         } catch (Exception e) {
             // Chat already shows the raw frame; nothing to open.
         }
+    }
+
+    /** Set by any "media" frame; read once, shortly after joining a room. */
+    private volatile boolean mediaSeenSinceJoin = false;
+
+    /**
+     * Tells a room that has nothing on what this player already has open.
+     *
+     * <p>The server replays the room's episode to anyone who joins, so a moment
+     * after joining this client knows whether the room is watching something.
+     * If it is, the replay lines this player up with it. If not, and a player
+     * is open here, this player's episode and position become the room's - so
+     * two people who started watching before connecting end up in sync instead
+     * of drifting until someone pauses.
+     */
+    private void announceIfRoomQuiet() {
+        Async.run("announce-on-join", () -> {
+            try { Thread.sleep(1_500); } catch (InterruptedException e) { return; }
+            Platform.runLater(() -> {
+                if (!server.isConnected() || mediaSeenSinceJoin || !mpv.isRunning()) return;
+                mediaPanel.reannounce();
+            });
+        });
     }
 
     /** Logs an app event to the chat transcript and flags it if chat is hidden. */
@@ -400,6 +426,10 @@ public class MainWindow {
         // changed. Nobody pressed anything, so the room must not hear about it.
         syncEngine.beginQuietPeriod();
         final int generation = playerGeneration.incrementAndGet();
+        // Seanime starts its player playing. Honour "open paused" for a player
+        // cowatch found by itself, unless it is opening to join someone, in
+        // which case their pause state wins.
+        final boolean holdPaused = quiet && startPaused() && !syncEngine.hasPendingJoin();
         Async.run("seanime-attach", () -> {
             List<String> socketPaths = candidates.get();
             if (quiet && socketPaths.isEmpty()) {
@@ -421,7 +451,12 @@ public class MainWindow {
                 mediaPanel.onSeanimeAttached(ok);
                 if (ok) {
                     playbackControls.setEnabled(true);
-                    systemMessage("Attached to the mpv window Seanime opened");
+                    systemMessage("Attached to the mpv window Seanime opened"
+                            + (holdPaused ? startNote(true) : ""));
+                    if (holdPaused) {
+                        SyncEngine engine = syncEngine;
+                        mpvExecutor.submit(engine::pauseQuietly);
+                    }
                 } else if (quiet) {
                     java.util.logging.Logger.getLogger(MainWindow.class.getName())
                             .fine("Automatic Seanime attach failed: " + error);
@@ -453,10 +488,11 @@ public class MainWindow {
      * viewer streaming from Jellyfin and one playing a Seanime download can be
      * talking about the same episode.
      */
-    public void announceMedia(int anilistId, int episode, String title, String source) {
-        if (!server.isConnected()) return;
+    public boolean announceMedia(int anilistId, int episode, String title, String source) {
+        if (!server.isConnected()) return false;
         server.sendMedia(anilistId, episode, title, source,
                 syncEngine.getRemotePosition(), syncEngine.isPaused());
+        return true;
     }
 
     // --- Next episode (IPC only) ------------------------------------------

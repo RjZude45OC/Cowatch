@@ -176,6 +176,31 @@ public class AniListClient {
         }
     }
 
+    /**
+     * The titles and format of one entry: {@code title.romaji}, {@code
+     * title.english}, {@code title.native}, {@code synonyms} and {@code format}
+     * ("TV", "MOVIE", ...). Public data, so no token is needed.
+     *
+     * <p>Used to find someone else's episode in this viewer's library when
+     * AniZip has no ids to go on, which is common for films.
+     *
+     * @return the Media object, or null on failure
+     */
+    public JSONObject fetchMedia(int mediaId) {
+        try {
+            JSONObject result = graphql(
+                    "query ($id: Int) { Media(id: $id, type: ANIME) {"
+                  + " id format episodes title { romaji english native } synonyms } }",
+                    new JSONObject().put("id", mediaId));
+            if (result == null) return null;
+            JSONObject data = result.optJSONObject("data");
+            return data == null ? null : data.optJSONObject("Media");
+        } catch (Exception e) {
+            log.warning("AniList fetchMedia failed for " + mediaId + ": " + e.getMessage());
+            return null;
+        }
+    }
+
     // ─── Token verify ─────────────────────────────────────────────────────
 
     public String verifyToken() {

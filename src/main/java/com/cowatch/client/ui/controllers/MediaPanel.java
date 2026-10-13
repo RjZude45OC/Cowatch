@@ -149,6 +149,10 @@ public class MediaPanel {
      */
     private boolean followLaunch = false;
 
+    /** What this client last announced, or would have if connected, for re-sending on join. */
+    private record Announced(int anilistId, int episode, String title, String source) {}
+    private Announced current;
+
     /** For AniList id lookups when no tracking token is set; search is public. */
     private final AniListClient publicAniList = new AniListClient("");
 
@@ -710,6 +714,7 @@ public class MediaPanel {
         playingKey       = "";
         lastAnnouncedKey = "";
         followLaunch     = false;
+        current          = null;
 
         launchLocalBtn.setText("▶  Launch in MPV"); launchLocalBtn.setDisable(false);
         launchJfBtn.setText("▶  Launch in MPV");
@@ -1000,9 +1005,12 @@ public class MediaPanel {
                 log.info("Not announcing: no AniList match for '" + searchTitle + "'");
                 return;
             }
-            int relativeEp = aniZip.resolveJellyfinEpisode(
+            // A film is AniList episode 1. Jellyfin numbers it 0, which the room
+            // would discard as "no episode" - so following a film did nothing.
+            boolean movie = "Movie".equals(item.type());
+            int relativeEp = movie ? 1 : aniZip.resolveJellyfinEpisode(
                     anilistId, item.seasonNumber(), item.episodeNumber());
-            final int episode = relativeEp > 0 ? relativeEp : item.episodeNumber();
+            final int episode = relativeEp > 0 ? relativeEp : Math.max(1, item.episodeNumber());
             Platform.runLater(() -> announce(anilistId, episode, searchTitle, "jellyfin"));
         });
     }
@@ -1045,9 +1053,23 @@ public class MediaPanel {
     private void announce(int anilistId, int episode, String title, String source) {
         String key = anilistId + ":" + episode;
         playingKey = key;
+        current    = new Announced(anilistId, episode, title, source);
         if (key.equals(lastAnnouncedKey)) return;
-        lastAnnouncedKey = key;
-        owner.announceMedia(anilistId, episode, title, source);
+        // Only counts as said once it reached a room; otherwise joining one
+        // later re-sends it (see reannounce()).
+        if (owner.announceMedia(anilistId, episode, title, source)) lastAnnouncedKey = key;
+    }
+
+    /**
+     * Re-sends what is playing, for a room that has nothing on. Called by
+     * MainWindow shortly after joining, with the current position.
+     */
+    public void reannounce() {
+        Announced a = current;
+        if (a == null || !(a.anilistId() + ":" + a.episode()).equals(playingKey)) return;
+        if (owner.announceMedia(a.anilistId(), a.episode(), a.title(), a.source())) {
+            lastAnnouncedKey = playingKey;
+        }
     }
 
     /** The tracking client when there is one, else a token-less one for search. */
@@ -1494,7 +1516,10 @@ public class MediaPanel {
     public void followPeer(PeerMedia peer) {
         String key = peer.key();
         if (key.equals(playingKey) && owner.isPlayerOpen()) {
-            log.info("Already playing " + key + "; not following " + peer.from());
+            // Same episode already open - typically both started before
+            // connecting. Line up with them rather than reopening it.
+            if (syncEngine != null) syncEngine.joinNow(peer.position(), peer.receivedAtMs(), peer.paused());
+            owner.systemMessage("Lined up with " + peer.from() + ", who is on the same episode");
             return;
         }
         String what = (peer.title().isBlank() ? "AniList " + peer.anilistId() : peer.title())
@@ -1532,28 +1557,29 @@ public class MediaPanel {
             return;
         }
         Async.run("follow-jellyfin", () -> {
-            JSONObject show = aniZip.fetchShow(peer.anilistId());
-            int tvdbId = 0, season = -1, number = -1;
-            List<String> titles = new ArrayList<>();
-            titles.add(peer.title());
-            if (show != null) {
-                JSONObject mappings = show.optJSONObject("mappings");
-                if (mappings != null) tvdbId = mappings.optInt("thetvdb_id", 0);
-                JSONObject eps = show.optJSONObject("episodes");
-                JSONObject ep  = eps == null ? null : eps.optJSONObject(String.valueOf(peer.episode()));
-                if (ep != null) {
-                    season = ep.optInt("seasonNumber", -1);
-                    number = ep.optInt("episodeNumber", -1);
+            ShowInfo info = lookUpShow(peer);
+
+            if (info.movie()) {
+                JellyfinItem movie = jf.findItem("Movie", peer.anilistId(),
+                        Map.of("Tmdb", info.tmdbId(), "Imdb", info.imdbId()), info.titles());
+                if (movie == null) {
+                    followFailed(peer, "Couldn't find " + what + " in your Jellyfin movies.");
+                    return;
                 }
-                JSONObject t = show.optJSONObject("titles");
-                if (t != null) for (String lang : t.keySet()) titles.add(t.optString(lang, ""));
+                Platform.runLater(() -> {
+                    if (!peer.key().equals(playingKey) || jellyfinClient != jf) return;
+                    followLaunch = true;
+                    startJellyfin(List.of(movie), movie);
+                });
+                return;
             }
 
-            JellyfinItem series = jf.findSeries(peer.anilistId(), tvdbId, titles);
+            JellyfinItem series = jf.findSeries(peer.anilistId(), info.tvdbId(), info.titles());
             if (series == null) {
                 followFailed(peer, "Couldn't find " + what + " in your Jellyfin library.");
                 return;
             }
+            int season = info.tvdbSeason(), number = info.tvdbEpisode();
             List<JellyfinItem> all = jf.getSeriesEpisodes(series.id());
             JellyfinItem target = pickJellyfinEpisode(all, season, number, peer.episode());
             if (target == null) {
@@ -1572,6 +1598,56 @@ public class MediaPanel {
                 startJellyfin(seasonEps, target);
             });
         });
+    }
+
+    /**
+     * What the libraries need to find someone else's episode: titles from
+     * AniZip, AniList and the announcement itself, other sites' ids, and how
+     * the episode is numbered on TVDB.
+     */
+    private record ShowInfo(boolean movie, int tvdbId, String tmdbId, String imdbId,
+                            int tvdbSeason, int tvdbEpisode, int absoluteEpisode,
+                            Set<String> titles) {}
+
+    /** Blocking; call off the FX thread. */
+    private ShowInfo lookUpShow(PeerMedia peer) {
+        Set<String> titles = new LinkedHashSet<>();
+        titles.add(peer.title());
+        boolean movie = false;
+        int tvdbId = 0, season = -1, number = -1, absolute = -1;
+        String tmdb = "", imdb = "";
+
+        JSONObject show = aniZip.fetchShow(peer.anilistId());
+        if (show != null) {
+            JSONObject mappings = show.optJSONObject("mappings");
+            if (mappings != null) {
+                tvdbId = mappings.optInt("thetvdb_id", 0);
+                tmdb   = mappings.isNull("themoviedb_id") ? "" : mappings.optString("themoviedb_id", "");
+                imdb   = mappings.isNull("imdb_id")       ? "" : mappings.optString("imdb_id", "");
+                movie  = "MOVIE".equalsIgnoreCase(mappings.optString("type", ""));
+            }
+            JSONObject eps = show.optJSONObject("episodes");
+            JSONObject ep  = eps == null ? null : eps.optJSONObject(String.valueOf(peer.episode()));
+            if (ep != null) {
+                season   = ep.optInt("seasonNumber", -1);
+                number   = ep.optInt("episodeNumber", -1);
+                absolute = ep.optInt("absoluteEpisodeNumber", -1);
+            }
+            JSONObject t = show.optJSONObject("titles");
+            if (t != null) for (String lang : t.keySet()) titles.add(t.optString(lang, ""));
+        }
+
+        // AniZip often has no titles at all for films; AniList always does.
+        JSONObject media = aniListForLookup().fetchMedia(peer.anilistId());
+        if (media != null) {
+            movie |= "MOVIE".equalsIgnoreCase(media.optString("format", ""));
+            JSONObject t = media.optJSONObject("title");
+            if (t != null) for (String k : t.keySet()) if (!t.isNull(k)) titles.add(t.optString(k, ""));
+            org.json.JSONArray syn = media.optJSONArray("synonyms");
+            if (syn != null) for (int i = 0; i < syn.length(); i++) titles.add(syn.optString(i, ""));
+        }
+        titles.removeIf(s -> s == null || s.isBlank());
+        return new ShowInfo(movie, tvdbId, tmdb, imdb, season, number, absolute, titles);
     }
 
     /**
@@ -1608,20 +1684,13 @@ public class MediaPanel {
             return;
         }
         Async.run("follow-local", () -> {
-            JSONObject show = aniZip.fetchShow(peer.anilistId());
+            ShowInfo info = lookUpShow(peer);
             Set<String> titles = new HashSet<>();
-            titles.add(JellyfinClient.titleKey(peer.title()));
-            int absolute = -1;
-            if (show != null) {
-                JSONObject t = show.optJSONObject("titles");
-                if (t != null) for (String lang : t.keySet()) titles.add(JellyfinClient.titleKey(t.optString(lang, "")));
-                JSONObject eps = show.optJSONObject("episodes");
-                JSONObject ep  = eps == null ? null : eps.optJSONObject(String.valueOf(peer.episode()));
-                if (ep != null) absolute = ep.optInt("absoluteEpisodeNumber", -1);
-            }
+            for (String t : info.titles()) titles.add(JellyfinClient.titleKey(t));
             titles.remove("");
 
-            File match = findLocalEpisode(localSearchDirs(anchorDir), titles, peer.episode(), absolute);
+            File match = findLocalEpisode(localSearchDirs(anchorDir), titles, peer.episode(),
+                    info.absoluteEpisode(), info.movie());
             if (match == null) {
                 followFailed(peer, "Couldn't find " + what + " in " + anchorDir.getParent()
                         + " or the folders in it.");
@@ -1660,7 +1729,8 @@ public class MediaPanel {
      * wanted episode, either as numbered within the season or as an absolute
      * number (long shows and many fansub releases number that way).
      */
-    private File findLocalEpisode(List<File> dirs, Set<String> titleKeys, int episode, int absolute) {
+    private File findLocalEpisode(List<File> dirs, Set<String> titleKeys, int episode, int absolute,
+                                  boolean movie) {
         for (File dir : dirs) {
             File[] files = dir.listFiles(f -> f.isFile() && isVideoFile(f.getName()));
             if (files == null) continue;
@@ -1675,7 +1745,9 @@ public class MediaPanel {
                         .map(Element::getValue).findFirst()
                         .map(v -> { try { return Integer.parseInt(v); } catch (NumberFormatException x) { return -1; } })
                         .orElse(-1);
-                if (ep != episode && (absolute <= 0 || ep != absolute)) continue;
+                // A film's file usually carries no episode number at all.
+                boolean epOk = ep == episode || (absolute > 0 && ep == absolute) || (movie && ep < 0);
+                if (!epOk) continue;
                 if (titleMatches(JellyfinClient.titleKey(title), titleKeys)) return f;
             }
         }
@@ -1688,13 +1760,7 @@ public class MediaPanel {
      * keeps two-letter titles from matching everything.
      */
     static boolean titleMatches(String parsedKey, Set<String> titleKeys) {
-        if (parsedKey.isEmpty()) return false;
-        for (String t : titleKeys) {
-            if (t.equals(parsedKey)) return true;
-            if (Math.min(t.length(), parsedKey.length()) >= 4
-                    && (t.contains(parsedKey) || parsedKey.contains(t))) return true;
-        }
-        return false;
+        return JellyfinClient.titleMatches(parsedKey, titleKeys);
     }
 
     private void followSeanime(PeerMedia peer, String what) {

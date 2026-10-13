@@ -156,6 +156,28 @@ public class SyncEngine {
     /** Drops a join that has not been applied, when what it was for is cancelled. */
     public void cancelJoin() { pendingJoin.set(null); }
 
+    /** True while a join is waiting for the next file to load. */
+    public boolean hasPendingJoin() { return pendingJoin.get() != null; }
+
+    /**
+     * Lines up the file already open with a peer, without waiting for a load.
+     * For when both sides already have the same episode open.
+     */
+    public void joinNow(double remotePos, long receivedAtMs, boolean remotePaused) {
+        pendingJoin.set(new PendingJoin(remotePos, receivedAtMs, remotePaused));
+        applyPendingJoin();
+    }
+
+    /**
+     * Pauses mpv without telling the room. For a player that started playing
+     * on its own - Seanime plays at once - when the viewer asked for players
+     * to open paused.
+     */
+    public void pauseQuietly() {
+        applyRemote(mpv::pause);
+        paused = true;
+    }
+
     private void applyPendingJoin() {
         PendingJoin join = pendingJoin.getAndSet(null);
         if (join == null) return;
