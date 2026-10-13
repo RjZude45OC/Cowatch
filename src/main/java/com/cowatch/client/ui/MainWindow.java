@@ -310,6 +310,23 @@ public class MainWindow {
         }
     }
 
+    /**
+     * Tells the room about a player cowatch just attached to, once it has
+     * reported where it is.
+     *
+     * <p>Seanime names the episode before cowatch can attach, when there is no
+     * position to send yet, so the announcement waits for this. With the
+     * player held paused, the room hears the pause first, so anyone already
+     * watching stops too instead of running on alone.
+     */
+    private void announceAttached(SyncEngine engine, boolean paused) {
+        Async.run("seanime-announce", () -> {
+            try { Thread.sleep(500); } catch (InterruptedException e) { return; }
+            if (paused) engine.sendPauseToRoom();
+            Platform.runLater(mediaPanel::reannounce);
+        });
+    }
+
     /** Set by any "media" frame; read once, shortly after joining a room. */
     private volatile boolean mediaSeenSinceJoin = false;
 
@@ -429,7 +446,9 @@ public class MainWindow {
         // Seanime starts its player playing. Honour "open paused" for a player
         // cowatch found by itself, unless it is opening to join someone, in
         // which case their pause state wins.
-        final boolean holdPaused = quiet && startPaused() && !syncEngine.hasPendingJoin();
+        final boolean following  = syncEngine.hasPendingJoin();
+        final boolean holdPaused = quiet && startPaused() && !following;
+        final SyncEngine engine  = syncEngine;
         Async.run("seanime-attach", () -> {
             List<String> socketPaths = candidates.get();
             if (quiet && socketPaths.isEmpty()) {
@@ -446,6 +465,9 @@ public class MainWindow {
                 if (found == null) break;
             }
             final String error = found;
+            // Pause straight from this thread, before anything queues behind
+            // the FX thread: every moment here is the episode running on.
+            if (error == null && holdPaused) engine.pauseQuietly();
             Platform.runLater(() -> {
                 boolean ok = (error == null);
                 mediaPanel.onSeanimeAttached(ok);
@@ -453,10 +475,7 @@ public class MainWindow {
                     playbackControls.setEnabled(true);
                     systemMessage("Attached to the mpv window Seanime opened"
                             + (holdPaused ? startNote(true) : ""));
-                    if (holdPaused) {
-                        SyncEngine engine = syncEngine;
-                        mpvExecutor.submit(engine::pauseQuietly);
-                    }
+                    if (!following) announceAttached(engine, holdPaused);
                 } else if (quiet) {
                     java.util.logging.Logger.getLogger(MainWindow.class.getName())
                             .fine("Automatic Seanime attach failed: " + error);

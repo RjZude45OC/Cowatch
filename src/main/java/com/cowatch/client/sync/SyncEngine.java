@@ -109,6 +109,9 @@ public class SyncEngine {
     public void beginQuietPeriod() {
         connectTime          = System.currentTimeMillis();
         lastPosTimestamp     = 0;
+        // The last player's position, until the new one reports - announcing
+        // it would send the room to the wrong place.
+        lastPos              = 0.0;
         lastMediaPath        = "";
         lastKnownPlaylistPos = -2;
         resetWatchedTracking();
@@ -176,6 +179,11 @@ public class SyncEngine {
     public void pauseQuietly() {
         applyRemote(mpv::pause);
         paused = true;
+    }
+
+    /** Tells the room this player is paused, at its current position. */
+    public void sendPauseToRoom() {
+        if (isSynced()) server.sendPause(clampRemote(toRemote(lastPos)));
     }
 
     private void applyPendingJoin() {

@@ -61,7 +61,7 @@ public class MediaPanel {
     }
 
     /** How often to look for a Seanime player to attach to, while there is none. */
-    private static final long SEANIME_WATCH_MS = 2_000;
+    private static final long SEANIME_WATCH_MS = 500;
 
     /** How many folders next to the last local file to search when following. */
     private static final int MAX_LOCAL_DIRS = 200;
@@ -1066,7 +1066,11 @@ public class MediaPanel {
      */
     public void reannounce() {
         Announced a = current;
-        if (a == null || !(a.anilistId() + ":" + a.episode()).equals(playingKey)) return;
+        if (a == null || !(a.anilistId() + ":" + a.episode()).equals(playingKey)) {
+            log.info("Nothing to announce: current=" + a + " playing=" + playingKey);
+            return;
+        }
+        log.info("Announcing " + a + " to the room");
         if (owner.announceMedia(a.anilistId(), a.episode(), a.title(), a.source())) {
             lastAnnouncedKey = playingKey;
         }
@@ -1470,7 +1474,14 @@ public class MediaPanel {
                 + "  ·  Episode " + episode);
         owner.setNowPlaying(name.isBlank() ? "AniList " + anilistId : name, "Episode " + episode);
 
-        announce(anilistId, episode, name, "seanime");
+        if (seanimeAttached) {
+            announce(anilistId, episode, name, "seanime");
+        } else {
+            // Not attached yet, so there is no position to send. Remember it;
+            // MainWindow announces once attached (see reannounce()).
+            playingKey = anilistId + ":" + episode;
+            current    = new Announced(anilistId, episode, name, "seanime");
+        }
     }
 
     /**
@@ -1515,6 +1526,8 @@ public class MediaPanel {
      */
     public void followPeer(PeerMedia peer) {
         String key = peer.key();
+        log.info("Room media from " + peer.from() + ": " + peer + " mode=" + currentMode
+                + " playing=" + playingKey + " open=" + owner.isPlayerOpen());
         if (key.equals(playingKey) && owner.isPlayerOpen()) {
             // Same episode already open - typically both started before
             // connecting. Line up with them rather than reopening it.
