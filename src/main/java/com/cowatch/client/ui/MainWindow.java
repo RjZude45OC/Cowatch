@@ -56,6 +56,9 @@ public class MainWindow {
     private final TrackingPanel    trackingPanel;
     private final SettingsPanel    settings;
 
+    /** Made on first use, once the window has its icon. */
+    private MiniPlayer miniPlayer;
+
     /** Wrappers created once; the centre is re-composed as chat toggles. */
     private final VBox centre = new VBox();
     private final VBox right  = new VBox();
@@ -108,6 +111,32 @@ public class MainWindow {
 
         buildLayout();
         wireShutdown();
+
+        // Minimising during playback swaps the window for the mini player;
+        // restoring it from the taskbar swaps back.
+        stage.iconifiedProperty().addListener((obs, was, iconified) -> {
+            if (iconified && mpv.isRunning()) mini().show();
+            else if (!iconified && miniPlayer != null) miniPlayer.hide();
+        });
+    }
+
+    private MiniPlayer mini() {
+        if (miniPlayer == null) miniPlayer = new MiniPlayer(this, stage);
+        return miniPlayer;
+    }
+
+    /** Shrinks to the mini player. */
+    public void showMiniPlayer() {
+        if (!mpv.isRunning()) return;
+        stage.setIconified(true);
+        mini().show();   // in case the listener did not fire (already iconified)
+    }
+
+    /** Closes the mini player and brings the window back, when playback ends. */
+    private void closeMiniPlayer() {
+        if (miniPlayer == null || !miniPlayer.isShowing()) return;
+        miniPlayer.hide();
+        stage.setIconified(false);
     }
 
     private void wireSyncEngine() {
@@ -493,6 +522,7 @@ public class MainWindow {
             }
             if (generation != playerGeneration.get()) return;   // replaced, not closed
             Platform.runLater(() -> {
+                closeMiniPlayer();
                 playbackControls.setEnabled(false);
                 systemMessage("Seanime's mpv window closed");
                 mediaPanel.onSeanimeAttached(false);
@@ -527,6 +557,7 @@ public class MainWindow {
     }
 
     private void onMpvClosed() {
+        closeMiniPlayer();
         playbackControls.setEnabled(false);
         systemMessage("MPV closed");
         mediaPanel.onMpvClosed(true);
@@ -535,7 +566,11 @@ public class MainWindow {
     /** Shows what is playing on the transport bar; see {@link PlaybackControls#setNowPlaying}. */
     public void setNowPlaying(String show, String episode) {
         playbackControls.setNowPlaying(show, episode);
+        mini().setNowPlaying(show, episode);
     }
+
+    /** Whether mpv last reported itself paused. */
+    public boolean isPaused() { return syncEngine.isPaused(); }
 
     /** True while an mpv window, launched or attached, is open. */
     public boolean isPlayerOpen() { return mpv.isRunning(); }
@@ -554,6 +589,11 @@ public class MainWindow {
     // --- Playback actions -------------------------------------------------
 
     public void doPlay()                 { mpvExecutor.submit(() -> syncEngine.localPlay()); }
+
+    /** The single play/pause button: plays when paused, pauses when playing. */
+    public void doPlayPause() {
+        if (syncEngine.isPaused()) doPlay(); else doPause();
+    }
     public void doPause()                { mpvExecutor.submit(() -> syncEngine.localPause()); }
     public void doSeek(double pos)       { mpvExecutor.submit(() -> syncEngine.localSeek(pos)); }
     public void doSkipForward(double s)  { mpvExecutor.submit(() -> syncEngine.localSkipForward(s)); }
@@ -587,6 +627,7 @@ public class MainWindow {
 
     private void wireShutdown() {
         stage.setOnCloseRequest(e -> {
+            if (miniPlayer != null) miniPlayer.hide();
             mediaPanel.shutdown();
             mpvExecutor.shutdownNow();
             syncEngine.close();

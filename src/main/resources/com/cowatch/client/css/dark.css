@@ -775,3 +775,14 @@
 /* Popover content inside the transport overflow menu. */
 .overflow-btn .context-menu,
 .menu-item .heading { -fx-text-fill: -sp-text; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   MINI PLAYER  — the always-on-top strip shown while minimised
+   ═══════════════════════════════════════════════════════════════════ */
+.mini-player {
+    -fx-background-color: -sp-surface;
+    -fx-border-color:     -sp-border;
+    -fx-background-radius: 10;
+    -fx-border-radius:     10;
+    -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.45), 14, 0.2, 0, 3);
+}
