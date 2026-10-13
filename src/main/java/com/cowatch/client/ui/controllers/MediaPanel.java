@@ -1441,7 +1441,10 @@ public class MediaPanel {
             if (!path.contains("://")) reindexSeanimeLibrary();
             return;
         }
-        announceSeanime(file.anilistId(), file.episode(), "", new File(file.path()).getName());
+        // A show title rather than the raw filename, so the other side has a
+        // usable title to search its own library with.
+        announceSeanime(file.anilistId(), file.episode(), parseFilename(file.path()).title(),
+                new File(file.path()).getName());
     }
 
     /** Seanime said what it is playing. */
