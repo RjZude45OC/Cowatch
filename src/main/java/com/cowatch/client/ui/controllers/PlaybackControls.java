@@ -15,7 +15,8 @@ import javafx.util.Duration;
 /**
  * The transport bar pinned to the bottom of the window while mpv is running:
  *
- * <pre>00:14:32   [-30] [-5] [play] [pause] [+5] [+30]            [...]</pre>
+ * <pre>Show name                 00:14:32 / 00:23:40  [-30] [-5] [play] [pause] [+5] [+30] [...]
+ * Episode 7</pre>
  *
  * <p>Previously a tall card in a permanent side column. It is now one row, and
  * it only exists on screen while there is something to control - mpv has its
@@ -42,6 +43,8 @@ public class PlaybackControls {
     private final TextField  seekField = new TextField();
     private final Button     seekBtn   = new Button("Go");
     private final Label      posLabel  = new Label("00:00:00");
+    private final Label      showLabel = new Label();
+    private final Label      epLabel   = new Label();
     private final MenuButton moreBtn   = new MenuButton("\u22EF");
 
     /** Drives posLabel. Runs only while the controls are enabled. */
@@ -73,12 +76,29 @@ public class PlaybackControls {
         HBox transport = new HBox(4, back30Btn, back5Btn, playBtn, pauseBtn, fwd5Btn, fwd30Btn);
         transport.setAlignment(Pos.CENTER);
 
-        Region spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
+        // What is playing sits on the left and gives way first when the window
+        // narrows - the title ellipsises, the buttons never get squeezed.
+        showLabel.getStyleClass().add("now-playing-show");
+        epLabel.getStyleClass().add("now-playing-episode");
+        showLabel.setTextOverrun(OverrunStyle.ELLIPSIS);
+        epLabel.setTextOverrun(OverrunStyle.ELLIPSIS);
+        showLabel.setMinWidth(0);
+        epLabel.setMinWidth(0);
+        epLabel.managedProperty().bind(epLabel.textProperty().isNotEmpty());
+        epLabel.visibleProperty().bind(epLabel.managedProperty());
+        VBox info = new VBox(1, showLabel, epLabel);
+        info.setAlignment(Pos.CENTER_LEFT);
+        // Zero preferred width: the title only ever gets the space the
+        // buttons leave over, so a long name can never squeeze them.
+        info.setMinWidth(0);
+        info.setPrefWidth(0);
+        HBox.setHgrow(info, Priority.ALWAYS);
+        setNowPlaying(null, null);
 
         buildOverflowMenu();
 
-        node.getChildren().addAll(posLabel, transport, spacer, moreBtn);
+        node.getChildren().addAll(info, posLabel, transport, moreBtn);
+        node.setSpacing(10);
         node.setAlignment(Pos.CENTER_LEFT);
         node.setPadding(new Insets(7, 12, 7, 12));
         node.getStyleClass().add("transport-bar");
@@ -176,6 +196,21 @@ public class PlaybackControls {
         return String.format("%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60);
     }
 
+    // --- Now playing ------------------------------------------------------
+
+    /**
+     * Names what mpv is playing.
+     *
+     * @param show    series or file title; null or blank when unknown
+     * @param episode e.g. "Episode 7"; null or blank to show only the title
+     */
+    public void setNowPlaying(String show, String episode) {
+        boolean known = show != null && !show.isBlank();
+        showLabel.setText(known ? show : "Now playing");
+        showLabel.setTooltip(known ? new Tooltip(show) : null);
+        epLabel.setText(episode == null ? "" : episode);
+    }
+
     // --- Enable / disable -------------------------------------------------
 
     /**
@@ -200,6 +235,7 @@ public class PlaybackControls {
         } else {
             positionTicker.stop();
             posLabel.setText("00:00:00");
+            setNowPlaying(null, null);
             moreBtn.hide();
         }
     }
@@ -207,6 +243,7 @@ public class PlaybackControls {
     private static Button transportBtn(String glyph, String tip) {
         Button b = new Button(glyph);
         b.getStyleClass().add("transport-btn");
+        b.setMinWidth(Region.USE_PREF_SIZE);
         b.setTooltip(new Tooltip(tip));
         return b;
     }

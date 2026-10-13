@@ -36,9 +36,9 @@ picking, sync, drift correction, chat, and episode tracking.
 - **Chat and event log** — a running transcript of who paused, who seeked and
   where, alongside plain chat.
 - **Uncluttered by default** — the window opens at 960×620 with just the media
-  browser. The server, sync mode and AniList settings live in a separate
-  settings window, chat is a toggle, and the transport bar appears only while
-  mpv is running.
+  browser. The server, sync mode and AniList settings live in a drawer that
+  the gear slides in from the right, chat is a toggle, and the transport bar,
+  showing the show and episode on the left, appears only while mpv is running.
 
 ## Requirements
 

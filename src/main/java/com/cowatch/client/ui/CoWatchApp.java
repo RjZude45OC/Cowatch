@@ -4,8 +4,10 @@ import com.cowatch.client.util.Async;
 
 import javafx.application.Application;
 import javafx.scene.Scene;
+import javafx.scene.image.Image;
 import javafx.stage.Stage;
 
+import java.io.InputStream;
 import java.net.URL;
 import java.util.logging.Logger;
 
@@ -18,6 +20,9 @@ public class CoWatchApp extends Application {
     private static final Logger log = Logger.getLogger(CoWatchApp.class.getName());
 
     public static final String CSS_PATH = "/com/cowatch/client/css/dark.css";
+
+    /** Window icon sizes; the OS picks the closest for title bar and taskbar. */
+    private static final int[] ICON_SIZES = { 16, 24, 32, 48, 64, 128, 256 };
 
     @Override
     public void start(Stage stage) {
@@ -34,11 +39,25 @@ public class CoWatchApp extends Application {
         else log.warning("Stylesheet not found on classpath: " + CSS_PATH);
 
         stage.setTitle("cowatch");
+        addIcons(stage);
         stage.setScene(scene);
         // Minimum size is owned by MainWindow, which sets a floor low enough
         // for its single-column phone layout to be reachable. Do not raise it
         // here or that layout mode becomes dead code.
         stage.show();
+    }
+
+    /** Missing icons are logged and skipped, like a missing stylesheet. */
+    private static void addIcons(Stage stage) {
+        for (int size : ICON_SIZES) {
+            String path = "/icons/cowatch-" + size + ".png";
+            try (InputStream in = CoWatchApp.class.getResourceAsStream(path)) {
+                if (in != null) stage.getIcons().add(new Image(in));
+                else log.warning("Icon not found on classpath: " + path);
+            } catch (Exception e) {
+                log.warning("Could not load icon " + path + ": " + e.getMessage());
+            }
+        }
     }
 
     @Override
