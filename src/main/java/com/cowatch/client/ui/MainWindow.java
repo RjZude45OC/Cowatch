@@ -258,13 +258,26 @@ public class MainWindow {
 
     /** Launches a single file or URL in mpv. */
     public void onLaunch(String mpvUrl) {
-        launch(() -> mpv.launch(mpvUrl), "MPV launched");
+        boolean paused = startPaused();
+        syncEngine.expectLaunch(paused);
+        launch(() -> mpv.launch(mpvUrl, paused), "MPV launched" + startNote(paused));
     }
 
     /** Launches a playlist in mpv, starting at {@code startIndex}. */
     public void onLaunchPlaylist(List<String> entries, int startIndex) {
-        launch(() -> mpv.launch(entries, startIndex),
-               "MPV launched (" + entries.size() + " episodes)");
+        boolean paused = startPaused();
+        syncEngine.expectLaunch(paused);
+        launch(() -> mpv.launch(entries, startIndex, paused),
+               "MPV launched (" + entries.size() + " episodes)" + startNote(paused));
+    }
+
+    /** Whether the next launch opens paused, per the start setting and the room. */
+    private boolean startPaused() {
+        return configPanel.getStartBehavior().startPaused(server.isConnected());
+    }
+
+    private static String startNote(boolean paused) {
+        return paused ? ", paused. Press play when everyone is ready" : "";
     }
 
     /**

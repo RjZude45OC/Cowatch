@@ -113,6 +113,18 @@ public class SyncEngine {
         resetWatchedTracking();
     }
 
+    /**
+     * Records the pause state a player is about to be launched in.
+     *
+     * <p>mpv answers the pause subscription with its starting state. A player
+     * launched to play at once would otherwise read as the viewer pressing play,
+     * and broadcast a play that seeks everyone already watching back to this
+     * player's start. With the baseline set, the first report is no change and
+     * the room hears nothing until someone actually presses play or pause.
+     */
+    public void expectLaunch(boolean startPaused) {
+        paused = startPaused;
+    }
 
     private final ScheduledExecutorService suppressScheduler =
             Executors.newSingleThreadScheduledExecutor(
