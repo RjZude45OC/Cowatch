@@ -28,7 +28,7 @@ import javafx.util.Duration;
 
 /**
  * The drawer everything set-once lives in: the cowatch server connection, the
- * sync mode, and the AniList token.
+ * sync mode, the AniList token and the colour theme.
  *
  * <p>It slides in from the right edge of the main window and the media browser
  * shrinks to make room, rather than opening a separate window that could end
@@ -72,7 +72,8 @@ public class SettingsPanel {
     public SettingsPanel(ConfigPanel configPanel, TrackingPanel trackingPanel) {
         Tab server = new Tab("Server", configPanel.getNode());
         Tab track  = new Tab("Tracking", trackingPanel.getNode());
-        tabs = new TabPane(server, track);
+        Tab theme  = new Tab("Theme", new ThemePanel().getNode());
+        tabs = new TabPane(server, track, theme);
         tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
         content = new BorderPane(tabs);
@@ -134,7 +135,7 @@ public class SettingsPanel {
         return footer;
     }
 
-    /** Opens the drawer on {@code tabIndex} (0 = Server, 1 = Tracking). */
+    /** Opens the drawer on {@code tabIndex} (0 = Server, 1 = Tracking, 2 = Theme). */
     public void show(int tabIndex) {
         tabs.getSelectionModel().select(tabIndex);
         setOpen(true);
