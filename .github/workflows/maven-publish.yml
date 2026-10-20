@@ -4,14 +4,21 @@ on:
     branches:
       - main
   workflow_dispatch:
+  # A full (non-pre) release with a vX.Y.Z tag builds that version and
+  # attaches its installers to the release; that is what the in-app updater
+  # offers. "released" covers both a new release and a prerelease that is
+  # edited into a full one. The build-N prereleases are test builds only.
+  release:
+    types: [released]
 
 permissions:
   contents: write
 
-# The run number is the build number: it is stamped into the app, the
-# installers and the release tag, and the in-app updater compares them.
+# A release build carries its tag's version (v1.2.3 -> 1.2.3) in the app and
+# the installers. Test builds stay at 1.0 and carry no version, so they never
+# self-update.
 env:
-  APP_VERSION: 1.0.${{ github.run_number }}
+  TAG_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || '1.0' }}
 
 jobs:
   build:
@@ -29,8 +36,21 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Work out the version
+        shell: bash
+        run: |
+          v="${TAG_VERSION#v}"
+          if [ "$GITHUB_EVENT_NAME" = release ]; then
+            if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Release tags must look like v1.2.3, got '$TAG_VERSION'"; exit 1
+            fi
+            echo "COWATCH_VERSION=$v" >> "$GITHUB_ENV"
+          fi
+          echo "APP_VERSION=$v" >> "$GITHUB_ENV"
+
       - name: Build fat JAR with Maven
-        run: mvn -B package -DskipTests "-Dcowatch.build=${{ github.run_number }}"
+        shell: bash
+        run: mvn -B package -DskipTests "-Dcowatch.version=${COWATCH_VERSION:-}"
 
       # Per-user install, so neither the first install nor a silent update
       # asks for admin rights. The upgrade UUID must never change, or MSI
@@ -82,7 +102,7 @@ jobs:
             --icon src/main/resources/icons/icon.png \
             --type app-image \
             --dest appimage
-          tar -czf dist/cowatch-linux-x64.tar.gz -C appimage cowatch
+          tar -czf "dist/cowatch-$APP_VERSION-linux-x64.tar.gz" -C appimage cowatch
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
@@ -99,12 +119,22 @@ jobs:
             --type dmg \
             --dest dist
 
-      - name: Upload to Release
+      - name: Upload to test prerelease
+        if: github.event_name != 'release'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
           name: "Build #${{ github.run_number }}"
           files: dist/*
           prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach to the published release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

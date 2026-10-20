@@ -21,7 +21,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Checks for a newer build at launch and, if the user agrees, downloads it,
+ * Checks for a newer release at launch and, if the user agrees, downloads it,
  * hands it to the installer script and quits so the script can swap it in.
  */
 final class UpdatePrompt {
@@ -47,8 +47,8 @@ final class UpdatePrompt {
         Alert alert = styled(new Alert(Alert.AlertType.INFORMATION, "", now, later));
         alert.setTitle("cowatch — Update available");
         alert.setHeaderText("A new version of cowatch is ready");
-        alert.setContentText("Build " + update.build + " is available (you have build "
-                + Updater.currentBuild() + "). cowatch will close, update and open again.");
+        alert.setContentText("Version " + update.version + " is available (you have "
+                + Updater.currentVersion() + "). cowatch will close, update and open again.");
         alert.showAndWait().filter(now::equals).ifPresent(b -> download(update));
     }
 
@@ -61,7 +61,7 @@ final class UpdatePrompt {
 
         Alert progress = styled(new Alert(Alert.AlertType.NONE, "", ButtonType.CANCEL));
         progress.setTitle("cowatch — Updating");
-        progress.setHeaderText("Downloading build " + update.build);
+        progress.setHeaderText("Downloading version " + update.version);
         progress.getDialogPane().setContent(box);
 
         Thread worker = new Thread(() -> {
