@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# The run number is the build number: it is stamped into the app, the
+# installers and the release tag, and the in-app updater compares them.
+env:
+  APP_VERSION: 1.0.${{ github.run_number }}
+
 jobs:
   build:
     strategy:
@@ -25,25 +30,36 @@ jobs:
           distribution: 'temurin'
 
       - name: Build fat JAR with Maven
-        run: mvn -B package -DskipTests
+        run: mvn -B package -DskipTests "-Dcowatch.build=${{ github.run_number }}"
 
+      # Per-user install, so neither the first install nor a silent update
+      # asks for admin rights. The upgrade UUID must never change, or MSI
+      # stops treating a new build as an upgrade of the installed one.
+      # The .exe is for first installs; the updater uses the .msi.
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
-          jpackage `
-            --input target `
-            --main-jar cowatch-client-1.0.0.jar `
-            --main-class com.cowatch.client.Launcher `
-            --name cowatch `
-            --app-version 1.0 `
-            --win-dir-chooser `
-            --win-shortcut `
-            --win-menu `
-            --icon src/main/resources/icons/icon.ico `
-            --type exe `
-            --dest dist
+          foreach ($type in 'exe', 'msi') {
+            jpackage `
+              --input target `
+              --main-jar cowatch-client-1.0.0.jar `
+              --main-class com.cowatch.client.Launcher `
+              --name cowatch `
+              --app-version $env:APP_VERSION `
+              --win-per-user-install `
+              --win-upgrade-uuid c5c90dff-9704-4829-a2c2-13c76c565c14 `
+              --win-dir-chooser `
+              --win-shortcut `
+              --win-menu `
+              --icon src/main/resources/icons/icon.ico `
+              --type $type `
+              --dest dist
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
         shell: pwsh
 
+      # The .deb installs system-wide and updates through a password prompt.
+      # The tarball can be unpacked anywhere the user owns and updates silently.
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -52,11 +68,21 @@ jobs:
             --main-jar cowatch-client-1.0.0.jar \
             --main-class com.cowatch.client.Launcher \
             --name cowatch \
-            --app-version 1.0 \
+            --app-version "$APP_VERSION" \
             --icon src/main/resources/icons/icon.png \
             --linux-shortcut \
             --type deb \
             --dest dist
+          jpackage \
+            --input target \
+            --main-jar cowatch-client-1.0.0.jar \
+            --main-class com.cowatch.client.Launcher \
+            --name cowatch \
+            --app-version "$APP_VERSION" \
+            --icon src/main/resources/icons/icon.png \
+            --type app-image \
+            --dest appimage
+          tar -czf dist/cowatch-linux-x64.tar.gz -C appimage cowatch
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
@@ -68,7 +94,7 @@ jobs:
             --main-jar cowatch-client-1.0.0.jar \
             --main-class com.cowatch.client.Launcher \
             --name cowatch \
-            --app-version 1.0 \
+            --app-version "$APP_VERSION" \
             --icon src/main/resources/icons/icon.icns \
             --type dmg \
             --dest dist

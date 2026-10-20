@@ -53,6 +53,9 @@ public class CoWatchApp extends Application {
         // for its single-column phone layout to be reachable. Do not raise it
         // here or that layout mode becomes dead code.
         stage.show();
+
+        // Installed builds look for a newer release; local builds skip this.
+        UpdatePrompt.checkInBackground(stage);
     }
 
     /** Missing icons are logged and skipped, like a missing stylesheet. */
