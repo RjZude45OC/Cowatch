@@ -10,7 +10,6 @@ import com.cowatch.client.util.LogBuffer;
  * fails on a classpath (non-modular) run with "JavaFX runtime components are
  * missing". Going through this indirection keeps the shaded fat JAR runnable
  * with a bare {@code java -jar}.
- *
  */
 public final class Launcher {
 
