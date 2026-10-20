@@ -86,6 +86,11 @@ public final class Updater {
         }
     }
 
+    /** Whether this copy can update itself: an installed release build. */
+    public static boolean updatesEnabled() {
+        return !currentVersion().isEmpty() && launcher().isPresent();
+    }
+
     /** Compares "X.Y.Z" versions (a leading "v" is ignored). */
     static int compareVersions(String a, String b) {
         Matcher ma = VERSION.matcher(a), mb = VERSION.matcher(b);
@@ -191,7 +196,11 @@ public final class Updater {
 
     /** Downloads the installer to a temp folder, reporting 0..1 progress. */
     public static Path download(Update u, DoubleConsumer progress) throws IOException, InterruptedException {
-        Path dir = Files.createTempDirectory("cowatch-update-");
+        // One fixed folder per version under the temp dir, reused on a retry
+        // instead of piling up a new random folder each time.
+        Path dir = Paths.get(System.getProperty("java.io.tmpdir")).toRealPath()
+                .resolve("cowatch-update").resolve(u.version);
+        Files.createDirectories(dir);
         Path file = dir.resolve(u.assetName);
         HttpRequest req = HttpRequest.newBuilder(u.assetUrl)
                 .header("User-Agent", "cowatch-client")
@@ -274,16 +283,26 @@ public final class Updater {
     /**
      * msiexec does a silent per-user upgrade (no admin prompt), into the
      * folder this copy already runs from so the relaunch path stays valid.
+     * The arguments go over as one string, which is how msiexec parses its
+     * command line. If msiexec can't open its log (exit 1622, which made
+     * every early update fail before installing anything) it runs again
+     * without one rather than give up.
      */
     static String windowsScript(long pid, Path msi, Path exe, Path logFile) {
         // No trailing backslash: before the closing quote it would escape it.
         String installDir = exe.getParent().toString();
         return "$ErrorActionPreference = 'Continue'\r\n"
+                + "$msi = " + ps(msi) + "\r\n"
+                + "$dir = " + ps(installDir) + "\r\n"
+                + "$log = " + ps(logFile.resolveSibling("msiexec.log")) + "\r\n"
                 + "Wait-Process -Id " + pid + " -Timeout 60 -ErrorAction SilentlyContinue\r\n"
-                + "$msiArgs = @('/i', '\"' + " + ps(msi) + " + '\"', 'INSTALLDIR=\"' + " + ps(installDir)
-                + " + '\"', '/qn', '/norestart', '/l*v', '\"' + " + ps(logFile.resolveSibling("msiexec.log")) + " + '\"')\r\n"
-                + "$p = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru\r\n"
+                + "$base = \"/i `\"$msi`\" INSTALLDIR=`\"$dir`\" /qn /norestart\"\r\n"
+                + "$p = Start-Process -FilePath 'msiexec.exe' -ArgumentList \"$base /l*v `\"$log`\"\" -Wait -PassThru\r\n"
                 + "\"msiexec exited with $($p.ExitCode)\"\r\n"
+                + "if ($p.ExitCode -eq 1622) {\r\n"
+                + "  $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList $base -Wait -PassThru\r\n"
+                + "  \"msiexec without a log exited with $($p.ExitCode)\"\r\n"
+                + "}\r\n"
                 + "Start-Process -FilePath " + ps(exe) + "\r\n";
     }
 
