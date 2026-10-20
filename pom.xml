@@ -15,9 +15,10 @@
         <maven.compiler.target>17</maven.compiler.target>
         <javafx.version>17.0.8</javafx.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <!-- CI passes -Dcowatch.build=<run number>; the updater compares it
-             with the newest build-N release. 0 means a local build. -->
-        <cowatch.build>0</cowatch.build>
+        <!-- CI passes -Dcowatch.version=X.Y.Z when building a vX.Y.Z release;
+             the updater compares it with the latest release. Empty means a
+             local or test build, which never updates. -->
+        <cowatch.version></cowatch.version>
     </properties>
 
     <dependencies>

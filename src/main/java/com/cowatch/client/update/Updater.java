@@ -26,9 +26,11 @@ import java.util.regex.Pattern;
 /**
  * Finds newer builds on the repo's GitHub Releases and installs them in place.
  *
- * <p>CI publishes every push to main as a release tagged {@code build-N} and
- * stamps N into {@code cowatch-build.properties}, so "newer" is just a bigger
- * N. Installing always happens after the app exits: a small script waits for
+ * <p>A release is published by hand with a {@code vX.Y.Z} tag; CI then builds
+ * it, stamps X.Y.Z into {@code cowatch-build.properties} and attaches the
+ * installers. "Newer" is the latest full release with a bigger version.
+ * The prerelease test builds from pushes to main are never offered.
+ * Installing always happens after the app exits: a small script waits for
  * this process to end, swaps in the new version and starts it again, because
  * none of the three platforms let a running app overwrite its own files
  * reliably.
@@ -38,26 +40,26 @@ public final class Updater {
     private static final Logger log = Logger.getLogger(Updater.class.getName());
 
     private static final String RELEASES_API =
-            "https://api.github.com/repos/RjZude45OC/Cowatch/releases?per_page=20";
-    private static final Pattern BUILD_TAG = Pattern.compile("build-(\\d+)");
+            "https://api.github.com/repos/RjZude45OC/Cowatch/releases/latest";
+    private static final Pattern VERSION = Pattern.compile("v?(\\d+)\\.(\\d+)\\.(\\d+)");
 
-    /** Asset name of the per-user Linux build (a tarred jpackage app image). */
-    static final String LINUX_TARBALL = "cowatch-linux-x64.tar.gz";
+    /** Name ending of the per-user Linux build (a tarred jpackage app image). */
+    static final String LINUX_TARBALL = "-linux-x64.tar.gz";
 
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .followRedirects(HttpClient.Redirect.NORMAL)
             .connectTimeout(Duration.ofSeconds(10))
             .build();
 
-    /** A release newer than this build, with the file this install needs. */
+    /** A release newer than this copy, with the file this install needs. */
     public static final class Update {
-        public final int build;
+        public final String version;
         public final String assetName;
         public final URI assetUrl;
         public final long size;
 
-        Update(int build, String assetName, URI assetUrl, long size) {
-            this.build = build;
+        Update(String version, String assetName, URI assetUrl, long size) {
+            this.version = version;
             this.assetName = assetName;
             this.assetUrl = assetUrl;
             this.size = size;
@@ -68,16 +70,31 @@ public final class Updater {
 
     private Updater() {}
 
-    /** This build's CI run number, or 0 for a local build, which never updates. */
-    public static int currentBuild() {
+    /**
+     * This copy's release version, e.g. "1.2.0", or empty for a local or
+     * test build, which never updates.
+     */
+    public static String currentVersion() {
         try (InputStream in = Updater.class.getResourceAsStream("/cowatch-build.properties")) {
-            if (in == null) return 0;
+            if (in == null) return "";
             Properties p = new Properties();
             p.load(in);
-            return Integer.parseInt(p.getProperty("build", "0").trim());
-        } catch (IOException | NumberFormatException e) {
-            return 0;
+            String v = p.getProperty("version", "").trim();
+            return VERSION.matcher(v).matches() ? v : "";
+        } catch (IOException e) {
+            return "";
         }
+    }
+
+    /** Compares "X.Y.Z" versions (a leading "v" is ignored). */
+    static int compareVersions(String a, String b) {
+        Matcher ma = VERSION.matcher(a), mb = VERSION.matcher(b);
+        if (!ma.matches() || !mb.matches()) throw new IllegalArgumentException(a + " / " + b);
+        for (int i = 1; i <= 3; i++) {
+            int c = Integer.compare(Integer.parseInt(ma.group(i)), Integer.parseInt(mb.group(i)));
+            if (c != 0) return c;
+        }
+        return 0;
     }
 
     /**
@@ -99,15 +116,15 @@ public final class Updater {
     }
 
     /**
-     * Asks GitHub for the newest build. Empty when this copy is up to date,
+     * Asks GitHub for the latest release. Empty when this copy is up to date,
      * is a local build, or the check failed (logged, never shown: a missed
      * check just means trying again next launch).
      */
     public static Optional<Update> check() {
-        int current = currentBuild();
+        String current = currentVersion();
         Optional<Path> launcher = launcher();
-        if (current <= 0 || launcher.isEmpty()) {
-            log.info("Update check skipped: not an installed CI build");
+        if (current.isEmpty() || launcher.isEmpty()) {
+            log.info("Update check skipped: not an installed release build");
             return Optional.empty();
         }
         try {
@@ -121,29 +138,29 @@ public final class Updater {
                 log.warning("Update check: GitHub answered " + res.statusCode());
                 return Optional.empty();
             }
-            Update best = null;
-            JSONArray releases = new JSONArray(res.body());
-            for (int i = 0; i < releases.length(); i++) {
-                JSONObject rel = releases.getJSONObject(i);
-                if (rel.optBoolean("draft")) continue;
-                Matcher m = BUILD_TAG.matcher(rel.optString("tag_name"));
-                if (!m.matches()) continue;
-                int build = Integer.parseInt(m.group(1));
-                if (build <= current || (best != null && build <= best.build)) continue;
-                JSONArray assets = rel.optJSONArray("assets");
-                if (assets == null) continue;
-                for (int j = 0; j < assets.length(); j++) {
-                    JSONObject a = assets.getJSONObject(j);
-                    String name = a.optString("name");
-                    if (wants(name, launcher.get())) {
-                        best = new Update(build, name,
-                                URI.create(a.getString("browser_download_url")), a.optLong("size", -1));
-                        break;
-                    }
+            JSONObject rel = new JSONObject(res.body());
+            String tag = rel.optString("tag_name");
+            if (!VERSION.matcher(tag).matches() || compareVersions(tag, current) <= 0) {
+                log.info("Update check: " + current + " is up to date (latest " + tag + ")");
+                return Optional.empty();
+            }
+            String version = tag.startsWith("v") ? tag.substring(1) : tag;
+            JSONArray assets = rel.optJSONArray("assets");
+            for (int j = 0; assets != null && j < assets.length(); j++) {
+                JSONObject a = assets.getJSONObject(j);
+                String name = a.optString("name");
+                // A release edited from a test build can still hold that
+                // build's installers; only this version's files count.
+                if (name.contains(version) && wants(name, launcher.get())) {
+                    log.info("Update available: " + version + " (running " + current + ")");
+                    return Optional.of(new Update(version, name,
+                            URI.create(a.getString("browser_download_url")), a.optLong("size", -1)));
                 }
             }
-            if (best != null) log.info("Update available: build " + best.build + " (running " + current + ")");
-            return Optional.ofNullable(best);
+            // CI attaches the installers a few minutes after the release is
+            // published; until then there is nothing to offer yet.
+            log.info("Update check: " + tag + " has no installer for this system yet");
+            return Optional.empty();
         } catch (IOException | RuntimeException e) {
             log.warning("Update check failed: " + e.getMessage());
             return Optional.empty();
@@ -158,7 +175,7 @@ public final class Updater {
         switch (os()) {
             case WINDOWS: return asset.endsWith(".msi");
             case MAC:     return asset.endsWith(".dmg");
-            case LINUX:   return linuxUserInstall(launcher) ? asset.equals(LINUX_TARBALL) : asset.endsWith(".deb");
+            case LINUX:   return linuxUserInstall(launcher) ? asset.endsWith(LINUX_TARBALL) : asset.endsWith(".deb");
             default:      return false;
         }
     }
