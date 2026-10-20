@@ -27,6 +27,7 @@
     -sp-accent-hover: #6a59e0;
     -sp-accent-press: #5848c8;
     -sp-accent-dim:   rgba(124,106,247,0.16);
+    -sp-accent-glow:  rgba(124,106,247,0.4);
 
     /* Semantic colours */
     -sp-green:     #2eca6a;
@@ -447,6 +448,10 @@
 }
 .list-view .list-cell:selected:focused { -fx-background-color: -sp-accent-dim; }
 .list-view:focused { -fx-border-color: -sp-accent; }
+/* Theme picker rows: the generic list-view label rule below is for the
+   placeholder, so the names need their own colour. */
+.list-view .list-cell .label.theme-name { -fx-text-fill: -sp-text; -fx-font-style: normal; }
+.list-view .list-cell .label.theme-kind { -fx-text-fill: -sp-text-dim; -fx-font-style: normal; -fx-font-size: 11px; }
 /* Placeholder text */
 .list-view .label { -fx-text-fill: -sp-text-muted; -fx-font-style: italic; }
 
@@ -511,7 +516,7 @@
 
 .slider .track  { -fx-background-color: -sp-border; -fx-background-radius: 3px; -fx-pref-height: 4px; }
 .slider .thumb  { -fx-background-color: -sp-accent; -fx-pref-width: 14px; -fx-pref-height: 14px; -fx-background-radius: 7px; }
-.slider .thumb:hover { -fx-background-color: -sp-accent-hover; -fx-effect: dropshadow(gaussian, rgba(124,106,247,0.4), 6, 0, 0, 0); }
+.slider .thumb:hover { -fx-background-color: -sp-accent-hover; -fx-effect: dropshadow(gaussian, -sp-accent-glow, 6, 0, 0, 0); }
 
 .progress-indicator { -fx-progress-color: -sp-accent; -fx-background-color: transparent; }
 .progress-bar { -fx-background-color: -sp-surface2; -fx-background-radius: 4px; }
@@ -585,7 +590,7 @@
 .radio-button:focused .radio,
 .toggle-button:focused,
 .search-field:focused {
-    -fx-effect: innershadow(gaussian, rgba(124,106,247,0.35), 5, 0, 0, 0);
+    -fx-effect: innershadow(gaussian, -sp-accent-glow, 5, 0, 0, 0);
 }
 
 /* ════════════════════════════════════════════════════════════════════════════

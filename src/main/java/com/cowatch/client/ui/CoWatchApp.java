@@ -28,6 +28,8 @@ public class CoWatchApp extends Application {
 
     @Override
     public void start(Stage stage) {
+        // Before any window exists, so none of them flashes the default theme.
+        Themes.install();
         MainWindow window = new MainWindow(stage);
         // Opens at roughly two thirds of the old 1400x870: the settings column
         // is gone, chat starts hidden and the transport bar only appears
