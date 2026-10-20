@@ -138,3 +138,25 @@ jobs:
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Renaming a test prerelease into a release keeps that build's 1.0 files
+  # next to the real ones. Once every installer is attached, drop any file
+  # that isn't named with this release's version.
+  clean-release:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove test-build files from the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          v="${TAG#v}"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' |
+          while read -r name; do
+            case "$name" in
+              *"$v"*) ;;
+              *) echo "Removing $name"; gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" --yes ;;
+            esac
+          done

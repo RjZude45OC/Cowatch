@@ -46,7 +46,8 @@ public class CoWatchApp extends Application {
         DebugConsole.installToggleKey(scene, console::toggle);
         stage.addEventHandler(WindowEvent.WINDOW_HIDDEN, e -> console.close());
 
-        stage.setTitle("cowatch");
+        String version = com.cowatch.client.update.Updater.currentVersion();
+        stage.setTitle(version.isEmpty() ? "cowatch" : "cowatch " + version);
         addIcons(stage);
         stage.setScene(scene);
         // Minimum size is owned by MainWindow, which sets a floor low enough

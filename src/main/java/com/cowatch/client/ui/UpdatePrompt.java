@@ -17,6 +17,7 @@ import javafx.stage.WindowEvent;
 
 import java.net.URL;
 import java.nio.file.Path;
+import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -39,6 +40,30 @@ final class UpdatePrompt {
         UpdatePrompt prompt = new UpdatePrompt(owner);
         Async.run("update-check", () ->
                 Updater.check().ifPresent(u -> Platform.runLater(() -> prompt.offer(u))));
+    }
+
+    /**
+     * The Settings button: same check, but always answers, through
+     * {@code status}, so a click never seems to do nothing.
+     */
+    static void checkNow(Stage owner, Consumer<String> status) {
+        if (!Updater.updatesEnabled()) {
+            status.accept("Updates only work in an installed release build.");
+            return;
+        }
+        status.accept("Checking\u2026");
+        UpdatePrompt prompt = new UpdatePrompt(owner);
+        Async.run("update-check", () -> {
+            var update = Updater.check();
+            Platform.runLater(() -> {
+                if (update.isPresent()) {
+                    status.accept("");
+                    prompt.offer(update.get());
+                } else {
+                    status.accept("You're on the latest version.");
+                }
+            });
+        });
     }
 
     private void offer(Updater.Update update) {

@@ -2,6 +2,7 @@ package com.cowatch.client.ui;
 
 import com.cowatch.client.ui.controllers.ConfigPanel;
 import com.cowatch.client.ui.controllers.TrackingPanel;
+import com.cowatch.client.update.Updater;
 
 import javafx.animation.Interpolator;
 import javafx.animation.KeyFrame;
@@ -9,13 +10,20 @@ import javafx.animation.KeyValue;
 import javafx.animation.Timeline;
 import javafx.beans.property.DoubleProperty;
 import javafx.beans.property.SimpleDoubleProperty;
+import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
 import javafx.scene.shape.Rectangle;
+import javafx.stage.Stage;
 import javafx.util.Duration;
 
 /**
@@ -68,6 +76,7 @@ public class SettingsPanel {
         tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
         content = new BorderPane(tabs);
+        content.setBottom(versionFooter());
         content.getStyleClass().add("settings-root");
         content.setPrefWidth(WIDTH);
         content.setMinWidth(Region.USE_PREF_SIZE);
@@ -99,6 +108,30 @@ public class SettingsPanel {
                 });
             }
         });
+    }
+
+    /** Which version this is, and a manual update check. */
+    private VBox versionFooter() {
+        String v = Updater.currentVersion();
+        Label version = new Label(v.isEmpty() ? "cowatch (test build)" : "cowatch " + v);
+        version.getStyleClass().add("muted");
+        Region gap = new Region();
+        HBox.setHgrow(gap, Priority.ALWAYS);
+        Button check = new Button("Check for updates");
+        check.getStyleClass().add("secondary");
+        HBox row = new HBox(8, version, gap, check);
+        row.setAlignment(Pos.CENTER_LEFT);
+
+        Label status = new Label();
+        status.getStyleClass().add("muted");
+        status.managedProperty().bind(status.textProperty().isNotEmpty());
+        status.visibleProperty().bind(status.textProperty().isNotEmpty());
+        check.setOnAction(e ->
+                UpdatePrompt.checkNow((Stage) node.getScene().getWindow(), status::setText));
+
+        VBox footer = new VBox(6, row, status);
+        footer.setPadding(new Insets(10, 14, 12, 14));
+        return footer;
     }
 
     /** Opens the drawer on {@code tabIndex} (0 = Server, 1 = Tracking). */
